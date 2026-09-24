@@ -2,6 +2,11 @@
 
 `Invoke-RepoMigration.ps1` migrates one approved private Bitbucket Cloud repository to an empty private repository in the `bcgov-c` GitHub organization.
 
+Detailed project documentation:
+
+- [Migration requirements](docs/requirements.md)
+- [Vertical delivery plan](docs/delivery-plan.md)
+
 ## Prerequisites
 
 - PowerShell 7
