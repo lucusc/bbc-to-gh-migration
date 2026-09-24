@@ -6,6 +6,39 @@ BeforeAll {
         -GitHubRepo 'test-destination' `
         -Owner 'test-owner' `
         -WorkingDirectory $TestDrive
+
+    function New-LocalRepositoryPair {
+        param(
+            [Parameter(Mandatory)][string]$Root,
+            [switch]$PopulateDestination
+        )
+
+        $sourceWork = Join-Path $Root 'source-work'
+        $sourceBare = Join-Path $Root 'source.git'
+        $destinationBare = Join-Path $Root 'destination.git'
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+
+        & git init --quiet $sourceWork
+        & git -C $sourceWork config user.name 'Migration Test'
+        & git -C $sourceWork config user.email 'migration-test@example.invalid'
+        Set-Content -LiteralPath (Join-Path $sourceWork 'README.md') -Value '# Test repository'
+        & git -C $sourceWork add README.md
+        & git -C $sourceWork commit --quiet -m 'Initial commit'
+        & git -C $sourceWork branch feature
+        & git -C $sourceWork tag v1
+        & git clone --quiet --bare $sourceWork $sourceBare
+        & git init --quiet --bare $destinationBare
+
+        if ($PopulateDestination) {
+            & git "--git-dir=$sourceBare" push --quiet --mirror $destinationBare
+        }
+
+        return @{
+            sourceWork = $sourceWork
+            sourceBare = $sourceBare
+            destinationBare = $destinationBare
+        }
+    }
 }
 
 Describe 'ConvertTo-SafeText' {
@@ -158,26 +191,100 @@ Describe 'Repository name validation' {
     }
 }
 
+Describe 'Reconciliation' {
+    It 'detects destination-only refs that make a mirror retry unsafe' {
+        $repositories = New-LocalRepositoryPair `
+            -Root (Join-Path $TestDrive 'reconciliation') `
+            -PopulateDestination
+        $mainHash = & git "--git-dir=$($repositories.sourceBare)" rev-parse refs/heads/main
+        & git "--git-dir=$($repositories.destinationBare)" update-ref refs/heads/destination-only $mainHash
+
+        $result = Get-ReconciliationResult `
+            $repositories.sourceBare `
+            $repositories.destinationBare
+
+        $result.exactMatch | Should -BeFalse
+        $result.unexpectedDestinationRefCount | Should -Be 1
+        $result.differences | Should -Contain 'Unexpected destination ref: refs/heads/destination-only'
+    }
+
+    It 'detects refs missing from the destination' {
+        $repositories = New-LocalRepositoryPair `
+            -Root (Join-Path $TestDrive 'missing-destination-ref') `
+            -PopulateDestination
+        & git "--git-dir=$($repositories.destinationBare)" update-ref -d refs/heads/feature
+
+        $result = Get-ReconciliationResult `
+            $repositories.sourceBare `
+            $repositories.destinationBare
+
+        $result.missingDestinationRefCount | Should -Be 1
+        $result.unexpectedDestinationRefCount | Should -Be 0
+        $result.differences | Should -Contain 'Missing destination ref: refs/heads/feature'
+    }
+}
+
+Describe 'Approved retry' {
+    It 'restores missing refs and preserves post-push state during recovery' {
+        $repositories = New-LocalRepositoryPair `
+            -Root (Join-Path $TestDrive 'approved-retry') `
+            -PopulateDestination
+        & git "--git-dir=$($repositories.destinationBare)" update-ref -d refs/heads/feature
+
+        $script:RunDirectory = Join-Path $TestDrive 'approved-retry-run'
+        $script:LogPath = Join-Path $script:RunDirectory 'migration.log'
+        $script:StatePath = Join-Path $TestDrive 'approved-retry-state.json'
+        $script:Approver = 'test-approver'
+        $script:ApprovalReference = 'CHANGE-123'
+        New-Item -ItemType Directory -Path $script:RunDirectory -Force | Out-Null
+        Write-MigrationState `
+            'PushStarted' `
+            $repositories.sourceBare `
+            $repositories.destinationBare
+
+        $reconciliation = Get-ReconciliationResult `
+            $repositories.sourceBare `
+            $repositories.destinationBare
+        $sourceBranchTagRefs = Get-ComparableRemoteRefMap `
+            $repositories.sourceBare `
+            -BranchesAndTagsOnly
+
+        $result = Invoke-Migration `
+            -SourceUrl $repositories.sourceBare `
+            -DestinationUrl $repositories.destinationBare `
+            -SourceRefs $sourceBranchTagRefs `
+            -ApprovedRetry `
+            -ExpectedSourceRefs $reconciliation.sourceRefs `
+            -ExpectedDestinationRefs $reconciliation.destinationRefs
+
+        $result.sourceRefCount | Should -Be 3
+        $state = Get-MigrationState
+        $state.status | Should -Be 'Verified'
+        $events = @(
+            $state.history |
+                Where-Object {
+                    $_.PSObject.Properties.Name -contains 'details' -and
+                    $_.details.PSObject.Properties.Name -contains 'event'
+                } |
+                ForEach-Object { $_.details.event }
+        )
+        $events | Should -Contain 'RecoveryCloneCompleted'
+        $state.history.status | Should -Not -Contain 'CloneCompleted'
+        (Get-ReconciliationResult `
+            $repositories.sourceBare `
+            $repositories.destinationBare).exactMatch | Should -BeTrue
+    }
+}
+
 Describe 'Non-LFS mirror migration' {
     It 'mirrors and verifies branches and tags between local bare repositories' {
-        $sourceWork = Join-Path $TestDrive 'source-work'
-        $sourceBare = Join-Path $TestDrive 'source.git'
-        $destinationBare = Join-Path $TestDrive 'destination.git'
+        $repositories = New-LocalRepositoryPair -Root (Join-Path $TestDrive 'initial-migration')
+        $sourceBare = $repositories.sourceBare
+        $destinationBare = $repositories.destinationBare
         $script:RunDirectory = Join-Path $TestDrive 'integration-run'
         $script:LogPath = Join-Path $script:RunDirectory 'migration.log'
         $script:StatePath = Join-Path $TestDrive 'integration-state.json'
         New-Item -ItemType Directory -Path $script:RunDirectory -Force | Out-Null
-
-        & git init --quiet $sourceWork
-        & git -C $sourceWork config user.name 'Migration Test'
-        & git -C $sourceWork config user.email 'migration-test@example.invalid'
-        Set-Content -LiteralPath (Join-Path $sourceWork 'README.md') -Value '# Test repository'
-        & git -C $sourceWork add README.md
-        & git -C $sourceWork commit --quiet -m 'Initial commit'
-        & git -C $sourceWork branch feature
-        & git -C $sourceWork tag v1
-        & git clone --quiet --bare $sourceWork $sourceBare
-        & git init --quiet --bare $destinationBare
 
         $sourceRefs = ConvertTo-RefMap @(& git ls-remote --heads --tags $sourceBare)
         $result = Invoke-Migration $sourceBare $destinationBare $sourceRefs
