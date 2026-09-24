@@ -14,7 +14,7 @@
 
 Authenticate using Git Credential Manager or GitHub CLI. Do not put credentials in repository URLs or script arguments. TLS certificate verification must remain enabled.
 
-## Preflight usage
+## Usage
 
 ```powershell
 .\Invoke-RepoMigration.ps1 `
@@ -27,4 +27,17 @@ Authenticate using Git Credential Manager or GitHub CLI. Do not put credentials 
   -MinimumFreeSpaceGB 20
 ```
 
-The current implementation performs preflight validation only. Migration execution and verification are added in the next delivery increment.
+The script:
+
+1. Validates tools, TLS settings, disk capacity, source access, and GitHub permissions.
+2. Confirms that the destination is private and empty.
+3. Requests confirmation before the first mirror push.
+4. Creates a mirror clone and fetches all LFS objects when requested.
+5. Pushes all Git refs and LFS objects.
+6. Compares all source and destination branch and tag hashes.
+7. For LFS repositories, downloads from GitHub and compares the LFS object inventory.
+8. Writes a sanitized log and JSON result under the working directory.
+
+The script writes `migration-state.json` immediately before the mirror push. Any later run for the same source repository is blocked, including after a successful migration. Reconcile the source and destination manually before removing or changing this guard; a repeated mirror push can delete destination-only refs.
+
+Use `-Confirm:$false` only when the complete source and destination mapping has already received explicit approval.

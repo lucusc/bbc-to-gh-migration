@@ -2,14 +2,17 @@
 param(
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
     [string]$BitbucketWorkspace,
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
     [string]$BitbucketRepo,
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
     [string]$GitHubRepo,
 
     [Parameter(Mandatory)]
@@ -30,9 +33,11 @@ $ErrorActionPreference = 'Stop'
 
 $script:GitHubOrganization = 'bcgov-c'
 $script:RunId = Get-Date -Format 'yyyyMMdd-HHmmss'
-$script:RunDirectory = Join-Path $WorkingDirectory "$BitbucketWorkspace--$BitbucketRepo\$script:RunId"
+$script:RepositoryDirectory = Join-Path $WorkingDirectory "$BitbucketWorkspace--$BitbucketRepo"
+$script:RunDirectory = Join-Path $script:RepositoryDirectory $script:RunId
 $script:LogPath = Join-Path $script:RunDirectory 'migration.log'
 $script:ResultPath = Join-Path $script:RunDirectory 'result.json'
+$script:StatePath = Join-Path $script:RepositoryDirectory 'migration-state.json'
 
 function ConvertTo-SafeText {
     param([AllowNull()][string]$Text)
@@ -95,6 +100,15 @@ function Invoke-NativeCommand {
         if ($line) {
             Write-MigrationLog INFO $line
         }
+    }
+
+    function Write-JsonFile {
+        param(
+            [Parameter(Mandatory)][System.Collections.IDictionary]$Data,
+            [Parameter(Mandatory)][string]$Path
+        )
+
+        $Data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Path -Encoding utf8
     }
 
     if ($exitCode -ne 0) {
@@ -210,10 +224,131 @@ function Get-GitHubRepositoryMetadata {
     }
 }
 
-function Test-RemoteRefs {
-    param([Parameter(Mandatory)][string]$RemoteUrl)
+function Get-RemoteRefLines {
+    param(
+        [Parameter(Mandatory)][string]$RemoteUrl,
+        [switch]$BranchesAndTagsOnly
+    )
 
-    return @(Invoke-NativeCommand git @('ls-remote', '--heads', '--tags', $RemoteUrl) -CaptureOutput)
+    $arguments = @('ls-remote')
+    if ($BranchesAndTagsOnly) {
+        $arguments += @('--heads', '--tags')
+    }
+    $arguments += $RemoteUrl
+
+    return @(Invoke-NativeCommand git $arguments -CaptureOutput)
+}
+
+function ConvertTo-RefMap {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Lines)
+
+    $refs = [ordered]@{}
+    foreach ($line in $Lines) {
+        if ($line -notmatch '^([0-9a-fA-F]{40,64})\s+(.+)$') {
+            throw "Unexpected git ls-remote output: $line"
+        }
+
+        $refs[$Matches[2]] = $Matches[1].ToLowerInvariant()
+    }
+
+    return $refs
+}
+
+function Compare-RefMaps {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$SourceRefs,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$DestinationRefs
+    )
+
+    $differences = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($refName in $SourceRefs.Keys) {
+        if (-not $DestinationRefs.Contains($refName)) {
+            $differences.Add("Missing destination ref: $refName")
+        }
+        elseif ($SourceRefs[$refName] -ne $DestinationRefs[$refName]) {
+            $differences.Add(
+                "Hash mismatch for ${refName}: source=$($SourceRefs[$refName]) destination=$($DestinationRefs[$refName])"
+            )
+        }
+    }
+
+    foreach ($refName in $DestinationRefs.Keys) {
+        if (-not $SourceRefs.Contains($refName)) {
+            $differences.Add("Unexpected destination ref: $refName")
+        }
+    }
+
+    return $differences.ToArray()
+}
+
+function Get-LfsObjectIds {
+    param([Parameter(Mandatory)][string]$RepositoryPath)
+
+    $lines = @(Invoke-NativeCommand git @('-C', $RepositoryPath, 'lfs', 'ls-files', '--all', '--long') -CaptureOutput)
+    $objectIds = @(
+        $lines |
+            ForEach-Object {
+                if ($_ -match '^([0-9a-fA-F]{64})\s') {
+                    $Matches[1].ToLowerInvariant()
+                }
+                elseif ($_){
+                    throw "Unexpected git lfs ls-files output: $_"
+                }
+            } |
+            Sort-Object -Unique
+    )
+
+    return $objectIds
+}
+
+function Compare-StringSets {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Expected,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Actual,
+        [Parameter(Mandatory)][string]$ValueName
+    )
+
+    $differences = @(
+        Compare-Object -ReferenceObject $Expected -DifferenceObject $Actual |
+            ForEach-Object {
+                if ($_.SideIndicator -eq '=>') {
+                    "Unexpected destination ${ValueName}: $($_.InputObject)"
+                }
+                else {
+                    "Missing destination ${ValueName}: $($_.InputObject)"
+                }
+            }
+    )
+
+    return $differences
+}
+
+function Assert-NoPriorPush {
+    if (-not (Test-Path -LiteralPath $script:StatePath)) {
+        return
+    }
+
+    $state = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
+    throw "A prior migration state exists with status '$($state.status)' from run '$($state.runId)'. Reconcile source and destination refs before any further mirror push. State: $script:StatePath"
+}
+
+function Write-MigrationState {
+    param(
+        [Parameter(Mandatory)][string]$Status,
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl
+    )
+
+    Write-JsonFile -Path $script:StatePath -Data ([ordered]@{
+        runId = $script:RunId
+        status = $Status
+        source = $SourceUrl
+        destination = $DestinationUrl
+        owner = $Owner
+        usesLfs = [bool]$UsesLfs
+        updatedAt = (Get-Date).ToString('o')
+    })
 }
 
 function Invoke-Preflight {
@@ -233,7 +368,7 @@ function Invoke-Preflight {
     Assert-TlsVerification
     Assert-FreeDiskSpace
 
-    $sourceRefs = Test-RemoteRefs $SourceUrl
+    $sourceRefs = Get-RemoteRefLines $SourceUrl -BranchesAndTagsOnly
     Write-MigrationLog INFO "Source access confirmed; found $($sourceRefs.Count) branch/tag ref entries."
 
     $metadata = Get-GitHubRepositoryMetadata $GitHubRepo
@@ -247,13 +382,91 @@ function Invoke-Preflight {
         throw 'Authenticated GitHub identity does not have push permission on the destination.'
     }
 
-    $destinationRefs = Test-RemoteRefs $DestinationUrl
+    $destinationRefs = Get-RemoteRefLines $DestinationUrl
     if ($destinationRefs.Count -ne 0) {
-        throw "Destination repository is not empty; found $($destinationRefs.Count) branch/tag ref entries."
+        throw "Destination repository is not empty; found $($destinationRefs.Count) ref entries."
     }
 
     Write-MigrationLog INFO 'Destination is private, writable, and empty.'
     return $sourceRefs
+}
+
+function Invoke-Migration {
+    param(
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$SourceRefs
+    )
+
+    $mirrorPath = Join-Path $script:RunDirectory "$BitbucketRepo.git"
+    $verificationPath = Join-Path $script:RunDirectory 'destination-verification'
+
+    Invoke-NativeCommand git @('clone', '--mirror', $SourceUrl, $mirrorPath)
+
+    $sourceLfsObjectIds = @()
+    if ($UsesLfs) {
+        Assert-FreeDiskSpace
+        Invoke-NativeCommand git @('-C', $mirrorPath, 'lfs', 'fetch', '--all')
+        $sourceLfsObjectIds = @(Get-LfsObjectIds $mirrorPath)
+        Write-MigrationLog INFO "Fetched $($sourceLfsObjectIds.Count) unique LFS objects from the source."
+    }
+
+    $destinationRefs = Get-RemoteRefLines $DestinationUrl
+    if ($destinationRefs.Count -ne 0) {
+        throw 'Destination gained refs after preflight. Mirror push has been blocked.'
+    }
+
+    Write-MigrationState 'PushStarted' $SourceUrl $DestinationUrl
+    Invoke-NativeCommand git @('-C', $mirrorPath, 'push', '--mirror', $DestinationUrl)
+    Write-MigrationState 'GitPushCompleted' $SourceUrl $DestinationUrl
+
+    if ($UsesLfs) {
+        Invoke-NativeCommand git @('-C', $mirrorPath, 'lfs', 'push', '--all', $DestinationUrl)
+        Write-MigrationState 'LfsPushCompleted' $SourceUrl $DestinationUrl
+    }
+
+    $destinationRefLines = Get-RemoteRefLines $DestinationUrl -BranchesAndTagsOnly
+    $destinationRefMap = ConvertTo-RefMap $destinationRefLines
+    $refDifferences = @(Compare-RefMaps $SourceRefs $destinationRefMap)
+    if ($refDifferences.Count -gt 0) {
+        foreach ($difference in $refDifferences) {
+            Write-MigrationLog ERROR $difference
+        }
+        throw "Source and destination refs differ in $($refDifferences.Count) place(s)."
+    }
+    Write-MigrationLog INFO "Verified $($SourceRefs.Count) source branch/tag ref entries against the destination."
+
+    $destinationLfsObjectIds = @()
+    if ($UsesLfs) {
+        $previousSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
+        $env:GIT_LFS_SKIP_SMUDGE = '1'
+        try {
+            Invoke-NativeCommand git @('clone', '--no-checkout', $DestinationUrl, $verificationPath)
+        }
+        finally {
+            $env:GIT_LFS_SKIP_SMUDGE = $previousSkipSmudge
+        }
+
+        Invoke-NativeCommand git @('-C', $verificationPath, 'lfs', 'fetch', '--all')
+        Invoke-NativeCommand git @('-C', $verificationPath, 'lfs', 'fsck')
+        $destinationLfsObjectIds = @(Get-LfsObjectIds $verificationPath)
+        $lfsDifferences = @(Compare-StringSets $sourceLfsObjectIds $destinationLfsObjectIds 'LFS object')
+        if ($lfsDifferences.Count -gt 0) {
+            foreach ($difference in $lfsDifferences) {
+                Write-MigrationLog ERROR $difference
+            }
+            throw "Source and destination LFS object inventories differ in $($lfsDifferences.Count) place(s)."
+        }
+        Write-MigrationLog INFO "Verified $($sourceLfsObjectIds.Count) unique LFS object IDs from the destination."
+    }
+
+    Write-MigrationState 'Verified' $SourceUrl $DestinationUrl
+    return [ordered]@{
+        sourceRefCount = $SourceRefs.Count
+        destinationRefCount = $destinationRefMap.Count
+        sourceLfsObjectCount = $sourceLfsObjectIds.Count
+        destinationLfsObjectCount = $destinationLfsObjectIds.Count
+    }
 }
 
 New-Item -ItemType Directory -Path $script:RunDirectory -Force | Out-Null
@@ -272,29 +485,41 @@ try {
     Write-MigrationLog INFO "Destination: $destinationUrl"
     Write-MigrationLog INFO "Uses LFS: $UsesLfs"
 
-    $sourceRefs = Invoke-Preflight $sourceUrl $destinationUrl
+    Assert-NoPriorPush
+    $sourceRefLines = Invoke-Preflight $sourceUrl $destinationUrl
+    $sourceRefs = ConvertTo-RefMap $sourceRefLines
     Write-MigrationLog INFO 'Preflight completed successfully.'
 
-    [ordered]@{
+    $migrationDescription = "mirror $sourceUrl to $destinationUrl"
+    if (-not $PSCmdlet.ShouldProcess($destinationUrl, $migrationDescription)) {
+        throw 'Migration was not approved.'
+    }
+
+    $verification = Invoke-Migration $sourceUrl $destinationUrl $sourceRefs
+    Write-MigrationLog INFO 'Migration and verification completed successfully. Owner sign-off remains manual.'
+
+    Write-JsonFile -Path $script:ResultPath -Data ([ordered]@{
         runId = $script:RunId
-        status = 'PreflightCompleted'
+        status = 'VerifiedPendingOwnerSignOff'
         owner = $Owner
         source = $sourceUrl
         destination = $destinationUrl
         usesLfs = [bool]$UsesLfs
-        sourceRefCount = $sourceRefs.Count
+        sourceRefCount = $verification.sourceRefCount
+        destinationRefCount = $verification.destinationRefCount
+        sourceLfsObjectCount = $verification.sourceLfsObjectCount
+        destinationLfsObjectCount = $verification.destinationLfsObjectCount
         completedAt = (Get-Date).ToString('o')
-    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:ResultPath -Encoding utf8
+    })
 }
 catch {
     Write-MigrationLog ERROR $_.Exception.Message
-    [ordered]@{
+    Write-JsonFile -Path $script:ResultPath -Data ([ordered]@{
         runId = $script:RunId
         status = 'Failed'
         owner = $Owner
         error = ConvertTo-SafeText $_.Exception.Message
         failedAt = (Get-Date).ToString('o')
-    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:ResultPath -Encoding utf8
+    })
     exit 1
 }
-
