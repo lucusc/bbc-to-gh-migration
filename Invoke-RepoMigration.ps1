@@ -32,7 +32,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:GitHubOrganization = 'bcgov-c'
-$script:RunId = Get-Date -Format 'yyyyMMdd-HHmmss'
+$script:RunId = Get-Date -Format 'yyyyMMdd-HHmmssfff'
 $script:RepositoryDirectory = Join-Path $WorkingDirectory "$BitbucketWorkspace--$BitbucketRepo"
 $script:RunDirectory = Join-Path $script:RepositoryDirectory $script:RunId
 $script:LogPath = Join-Path $script:RunDirectory 'migration.log'
@@ -63,7 +63,7 @@ function Write-MigrationLog {
     )
 
     $entry = '{0:o} [{1}] {2}' -f (Get-Date), $Level, (ConvertTo-SafeText $Message)
-    Write-Host $entry
+    Write-Information $entry -InformationAction Continue
     Add-Content -LiteralPath $script:LogPath -Value $entry -Encoding utf8
 }
 
@@ -102,15 +102,6 @@ function Invoke-NativeCommand {
         }
     }
 
-    function Write-JsonFile {
-        param(
-            [Parameter(Mandatory)][System.Collections.IDictionary]$Data,
-            [Parameter(Mandatory)][string]$Path
-        )
-
-        $Data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Path -Encoding utf8
-    }
-
     if ($exitCode -ne 0) {
         throw "Command failed with exit code ${exitCode}: $FilePath $displayArguments"
     }
@@ -118,6 +109,15 @@ function Invoke-NativeCommand {
     if ($CaptureOutput) {
         return $safeOutput
     }
+}
+
+function Write-JsonFile {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Data,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $Data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Path -Encoding utf8
 }
 
 function Assert-SafeRepositoryName {
@@ -140,15 +140,14 @@ function Assert-CommandAvailable {
 }
 
 function Assert-TlsVerification {
-    $scopeArguments = @(
-        @('config', '--system', '--get', 'http.sslVerify'),
-        @('config', '--global', '--get', 'http.sslVerify')
-    )
+    $configEntries = @(& git config --list --show-origin 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to inspect Git configuration for TLS certificate verification.'
+    }
 
-    foreach ($arguments in $scopeArguments) {
-        $value = & git @arguments 2>$null
-        if ($LASTEXITCODE -eq 0 -and "$value".Trim() -ieq 'false') {
-            throw "Git TLS certificate verification is disabled in $($arguments[1].TrimStart('-')) configuration."
+    foreach ($entry in $configEntries) {
+        if ($entry -match '(?i)\shttp(?:\..+)?\.sslverify=false\s*$') {
+            throw "Git TLS certificate verification is disabled: $entry"
         }
     }
 
@@ -283,9 +282,20 @@ function Compare-RefMaps {
 }
 
 function Get-LfsObjectIds {
-    param([Parameter(Mandatory)][string]$RepositoryPath)
+    param(
+        [Parameter(Mandatory)][string]$RepositoryPath,
+        [switch]$Bare
+    )
 
-    $lines = @(Invoke-NativeCommand git @('-C', $RepositoryPath, 'lfs', 'ls-files', '--all', '--long') -CaptureOutput)
+    $repositoryArguments = if ($Bare) {
+        @("--git-dir=$RepositoryPath")
+    }
+    else {
+        @('-C', $RepositoryPath)
+    }
+    $lines = @(
+        Invoke-NativeCommand git ($repositoryArguments + @('lfs', 'ls-files', '--all', '--long')) -CaptureOutput
+    )
     $objectIds = @(
         $lines |
             ForEach-Object {
@@ -368,7 +378,7 @@ function Invoke-Preflight {
     Assert-TlsVerification
     Assert-FreeDiskSpace
 
-    $sourceRefs = Get-RemoteRefLines $SourceUrl -BranchesAndTagsOnly
+    $sourceRefs = @(Get-RemoteRefLines $SourceUrl -BranchesAndTagsOnly)
     Write-MigrationLog INFO "Source access confirmed; found $($sourceRefs.Count) branch/tag ref entries."
 
     $metadata = Get-GitHubRepositoryMetadata $GitHubRepo
@@ -382,7 +392,7 @@ function Invoke-Preflight {
         throw 'Authenticated GitHub identity does not have push permission on the destination.'
     }
 
-    $destinationRefs = Get-RemoteRefLines $DestinationUrl
+    $destinationRefs = @(Get-RemoteRefLines $DestinationUrl)
     if ($destinationRefs.Count -ne 0) {
         throw "Destination repository is not empty; found $($destinationRefs.Count) ref entries."
     }
@@ -406,26 +416,26 @@ function Invoke-Migration {
     $sourceLfsObjectIds = @()
     if ($UsesLfs) {
         Assert-FreeDiskSpace
-        Invoke-NativeCommand git @('-C', $mirrorPath, 'lfs', 'fetch', '--all')
-        $sourceLfsObjectIds = @(Get-LfsObjectIds $mirrorPath)
+        Invoke-NativeCommand git @("--git-dir=$mirrorPath", 'lfs', 'fetch', '--all')
+        $sourceLfsObjectIds = @(Get-LfsObjectIds $mirrorPath -Bare)
         Write-MigrationLog INFO "Fetched $($sourceLfsObjectIds.Count) unique LFS objects from the source."
     }
 
-    $destinationRefs = Get-RemoteRefLines $DestinationUrl
+    $destinationRefs = @(Get-RemoteRefLines $DestinationUrl)
     if ($destinationRefs.Count -ne 0) {
         throw 'Destination gained refs after preflight. Mirror push has been blocked.'
     }
 
     Write-MigrationState 'PushStarted' $SourceUrl $DestinationUrl
-    Invoke-NativeCommand git @('-C', $mirrorPath, 'push', '--mirror', $DestinationUrl)
+    Invoke-NativeCommand git @("--git-dir=$mirrorPath", 'push', '--mirror', $DestinationUrl)
     Write-MigrationState 'GitPushCompleted' $SourceUrl $DestinationUrl
 
     if ($UsesLfs) {
-        Invoke-NativeCommand git @('-C', $mirrorPath, 'lfs', 'push', '--all', $DestinationUrl)
+        Invoke-NativeCommand git @("--git-dir=$mirrorPath", 'lfs', 'push', '--all', $DestinationUrl)
         Write-MigrationState 'LfsPushCompleted' $SourceUrl $DestinationUrl
     }
 
-    $destinationRefLines = Get-RemoteRefLines $DestinationUrl -BranchesAndTagsOnly
+    $destinationRefLines = @(Get-RemoteRefLines $DestinationUrl -BranchesAndTagsOnly)
     $destinationRefMap = ConvertTo-RefMap $destinationRefLines
     $refDifferences = @(Compare-RefMaps $SourceRefs $destinationRefMap)
     if ($refDifferences.Count -gt 0) {
@@ -469,57 +479,66 @@ function Invoke-Migration {
     }
 }
 
-New-Item -ItemType Directory -Path $script:RunDirectory -Force | Out-Null
+function Invoke-Main {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param()
 
-try {
-    Assert-SafeRepositoryName $BitbucketWorkspace 'BitbucketWorkspace'
-    Assert-SafeRepositoryName $BitbucketRepo 'BitbucketRepo'
-    Assert-SafeRepositoryName $GitHubRepo 'GitHubRepo'
+    New-Item -ItemType Directory -Path $script:RunDirectory -Force | Out-Null
 
-    $sourceUrl = "https://bitbucket.org/$BitbucketWorkspace/$BitbucketRepo.git"
-    $destinationUrl = "https://github.com/$script:GitHubOrganization/$GitHubRepo.git"
+    try {
+        Assert-SafeRepositoryName $BitbucketWorkspace 'BitbucketWorkspace'
+        Assert-SafeRepositoryName $BitbucketRepo 'BitbucketRepo'
+        Assert-SafeRepositoryName $GitHubRepo 'GitHubRepo'
 
-    Write-MigrationLog INFO "Run ID: $script:RunId"
-    Write-MigrationLog INFO "Owner: $Owner"
-    Write-MigrationLog INFO "Source: $sourceUrl"
-    Write-MigrationLog INFO "Destination: $destinationUrl"
-    Write-MigrationLog INFO "Uses LFS: $UsesLfs"
+        $sourceUrl = "https://bitbucket.org/$BitbucketWorkspace/$BitbucketRepo.git"
+        $destinationUrl = "https://github.com/$script:GitHubOrganization/$GitHubRepo.git"
 
-    Assert-NoPriorPush
-    $sourceRefLines = Invoke-Preflight $sourceUrl $destinationUrl
-    $sourceRefs = ConvertTo-RefMap $sourceRefLines
-    Write-MigrationLog INFO 'Preflight completed successfully.'
+        Write-MigrationLog INFO "Run ID: $script:RunId"
+        Write-MigrationLog INFO "Owner: $Owner"
+        Write-MigrationLog INFO "Source: $sourceUrl"
+        Write-MigrationLog INFO "Destination: $destinationUrl"
+        Write-MigrationLog INFO "Uses LFS: $UsesLfs"
 
-    $migrationDescription = "mirror $sourceUrl to $destinationUrl"
-    if (-not $PSCmdlet.ShouldProcess($destinationUrl, $migrationDescription)) {
-        throw 'Migration was not approved.'
+        Assert-NoPriorPush
+        $sourceRefLines = Invoke-Preflight $sourceUrl $destinationUrl
+        $sourceRefs = ConvertTo-RefMap $sourceRefLines
+        Write-MigrationLog INFO 'Preflight completed successfully.'
+
+        $migrationDescription = "mirror $sourceUrl to $destinationUrl"
+        if (-not $PSCmdlet.ShouldProcess($destinationUrl, $migrationDescription)) {
+            throw 'Migration was not approved.'
+        }
+
+        $verification = Invoke-Migration $sourceUrl $destinationUrl $sourceRefs
+        Write-MigrationLog INFO 'Migration and verification completed successfully. Owner sign-off remains manual.'
+
+        Write-JsonFile -Path $script:ResultPath -Data ([ordered]@{
+            runId = $script:RunId
+            status = 'VerifiedPendingOwnerSignOff'
+            owner = $Owner
+            source = $sourceUrl
+            destination = $destinationUrl
+            usesLfs = [bool]$UsesLfs
+            sourceRefCount = $verification.sourceRefCount
+            destinationRefCount = $verification.destinationRefCount
+            sourceLfsObjectCount = $verification.sourceLfsObjectCount
+            destinationLfsObjectCount = $verification.destinationLfsObjectCount
+            completedAt = (Get-Date).ToString('o')
+        })
     }
-
-    $verification = Invoke-Migration $sourceUrl $destinationUrl $sourceRefs
-    Write-MigrationLog INFO 'Migration and verification completed successfully. Owner sign-off remains manual.'
-
-    Write-JsonFile -Path $script:ResultPath -Data ([ordered]@{
-        runId = $script:RunId
-        status = 'VerifiedPendingOwnerSignOff'
-        owner = $Owner
-        source = $sourceUrl
-        destination = $destinationUrl
-        usesLfs = [bool]$UsesLfs
-        sourceRefCount = $verification.sourceRefCount
-        destinationRefCount = $verification.destinationRefCount
-        sourceLfsObjectCount = $verification.sourceLfsObjectCount
-        destinationLfsObjectCount = $verification.destinationLfsObjectCount
-        completedAt = (Get-Date).ToString('o')
-    })
+    catch {
+        Write-MigrationLog ERROR $_.Exception.Message
+        Write-JsonFile -Path $script:ResultPath -Data ([ordered]@{
+            runId = $script:RunId
+            status = 'Failed'
+            owner = $Owner
+            error = ConvertTo-SafeText $_.Exception.Message
+            failedAt = (Get-Date).ToString('o')
+        })
+        exit 1
+    }
 }
-catch {
-    Write-MigrationLog ERROR $_.Exception.Message
-    Write-JsonFile -Path $script:ResultPath -Data ([ordered]@{
-        runId = $script:RunId
-        status = 'Failed'
-        owner = $Owner
-        error = ConvertTo-SafeText $_.Exception.Message
-        failedAt = (Get-Date).ToString('o')
-    })
-    exit 1
+
+if ($MyInvocation.InvocationName -ne '.') {
+    Invoke-Main
 }

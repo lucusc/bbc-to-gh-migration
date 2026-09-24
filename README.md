@@ -41,3 +41,9 @@ The script:
 The script writes `migration-state.json` immediately before the mirror push. Any later run for the same source repository is blocked, including after a successful migration. Reconcile the source and destination manually before removing or changing this guard; a repeated mirror push can delete destination-only refs.
 
 Use `-Confirm:$false` only when the complete source and destination mapping has already received explicit approval.
+
+## Tests
+
+```powershell
+Invoke-Pester .\tests
+```
