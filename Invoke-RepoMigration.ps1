@@ -206,12 +206,18 @@ function Test-IsPostPushState {
     )
 }
 
-function Assert-RecoveryApproval {
-    if ([string]::IsNullOrWhiteSpace($Approver)) {
-        throw 'Retry requires -Approver.'
+function Assert-ApprovalMetadata {
+    param(
+        [Parameter(Mandatory)][string]$Action,
+        [AllowNull()][string]$ApproverValue,
+        [AllowNull()][string]$ApprovalReferenceValue
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ApproverValue)) {
+        throw "$Action requires -Approver."
     }
-    if ([string]::IsNullOrWhiteSpace($ApprovalReference)) {
-        throw 'Retry requires -ApprovalReference.'
+    if ([string]::IsNullOrWhiteSpace($ApprovalReferenceValue)) {
+        throw "$Action requires -ApprovalReference."
     }
 }
 
@@ -554,7 +560,9 @@ function Write-RecoveryEvent {
     param(
         [Parameter(Mandatory)][string]$Event,
         [Parameter(Mandatory)][string]$SourceUrl,
-        [Parameter(Mandatory)][string]$DestinationUrl
+        [Parameter(Mandatory)][string]$DestinationUrl,
+        [Parameter(Mandatory)][string]$RecoveryApprover,
+        [Parameter(Mandatory)][string]$RecoveryApprovalReference
     )
 
     $state = Get-MigrationState
@@ -563,8 +571,8 @@ function Write-RecoveryEvent {
     }
     Write-MigrationState $state.status $SourceUrl $DestinationUrl @{
         event = $Event
-        approver = $Approver
-        approvalReference = $ApprovalReference
+        approver = $RecoveryApprover
+        approvalReference = $RecoveryApprovalReference
     }
 }
 
@@ -642,7 +650,9 @@ function Invoke-Migration {
         [switch]$ApprovedRetry,
         [switch]$SkipGitPush,
         [System.Collections.IDictionary]$ExpectedSourceRefs,
-        [System.Collections.IDictionary]$ExpectedDestinationRefs
+        [System.Collections.IDictionary]$ExpectedDestinationRefs,
+        [string]$RecoveryApprover,
+        [string]$RecoveryApprovalReference
     )
 
     $mirrorPath = Join-Path $script:RunDirectory "$BitbucketRepo.git"
@@ -650,7 +660,12 @@ function Invoke-Migration {
 
     Invoke-NativeCommand git @('clone', '--mirror', $SourceUrl, $mirrorPath)
     if ($ApprovedRetry) {
-        Write-RecoveryEvent 'RecoveryCloneCompleted' $SourceUrl $DestinationUrl
+        Write-RecoveryEvent `
+            'RecoveryCloneCompleted' `
+            $SourceUrl `
+            $DestinationUrl `
+            $RecoveryApprover `
+            $RecoveryApprovalReference
     }
     else {
         Write-MigrationState 'CloneCompleted' $SourceUrl $DestinationUrl
@@ -662,7 +677,12 @@ function Invoke-Migration {
         Invoke-NativeCommand git @("--git-dir=$mirrorPath", 'lfs', 'fetch', '--all')
         $sourceLfsObjectIds = @(Get-LfsObjectIds $mirrorPath -Bare)
         if ($ApprovedRetry) {
-            Write-RecoveryEvent 'RecoveryLfsFetched' $SourceUrl $DestinationUrl
+            Write-RecoveryEvent `
+                'RecoveryLfsFetched' `
+                $SourceUrl `
+                $DestinationUrl `
+                $RecoveryApprover `
+                $RecoveryApprovalReference
         }
         else {
             Write-MigrationState 'LfsFetched' $SourceUrl $DestinationUrl
@@ -688,8 +708,8 @@ function Invoke-Migration {
         if ($ApprovedRetry) {
             $pushDetails = @{
                 approvedRetry = $true
-                approver = $Approver
-                approvalReference = $ApprovalReference
+                approver = $RecoveryApprover
+                approvalReference = $RecoveryApprovalReference
             }
         }
         Write-MigrationState 'PushStarted' $SourceUrl $DestinationUrl $pushDetails
@@ -706,8 +726,8 @@ function Invoke-Migration {
         if ($ApprovedRetry) {
             $lfsDetails = @{
                 approvedRetry = $true
-                approver = $Approver
-                approvalReference = $ApprovalReference
+                approver = $RecoveryApprover
+                approvalReference = $RecoveryApprovalReference
             }
         }
         Write-MigrationState 'LfsPushCompleted' $SourceUrl $DestinationUrl $lfsDetails
@@ -803,10 +823,12 @@ function Invoke-Reconciliation {
 function Invoke-ApprovedRetry {
     param(
         [Parameter(Mandatory)][string]$SourceUrl,
-        [Parameter(Mandatory)][string]$DestinationUrl
+        [Parameter(Mandatory)][string]$DestinationUrl,
+        [Parameter(Mandatory)][string]$RecoveryApprover,
+        [Parameter(Mandatory)][string]$RecoveryApprovalReference
     )
 
-    Assert-RecoveryApproval
+    Assert-ApprovalMetadata 'Retry' $RecoveryApprover $RecoveryApprovalReference
     $state = Get-MigrationState
     if ($null -eq $state) {
         throw "No migration state exists to retry: $script:StatePath"
@@ -842,7 +864,56 @@ function Invoke-ApprovedRetry {
         -ApprovedRetry `
         -SkipGitPush:$skipGitPush `
         -ExpectedSourceRefs $reconciliation.sourceRefs `
-        -ExpectedDestinationRefs $reconciliation.destinationRefs
+        -ExpectedDestinationRefs $reconciliation.destinationRefs `
+        -RecoveryApprover $RecoveryApprover `
+        -RecoveryApprovalReference $RecoveryApprovalReference
+}
+
+function Invoke-OwnerSignOff {
+    param(
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl,
+        [Parameter(Mandatory)][string]$SignOffApprover,
+        [Parameter(Mandatory)][string]$SignOffApprovalReference,
+        [AllowNull()][string]$SignOffComments
+    )
+
+    Assert-ApprovalMetadata 'Sign-off' $SignOffApprover $SignOffApprovalReference
+    $state = Get-MigrationState
+    if ($null -eq $state) {
+        throw "No migration state exists to sign off: $script:StatePath"
+    }
+    Assert-StateIdentity $state $SourceUrl $DestinationUrl
+    if ($state.status -eq 'SignedOff') {
+        throw "Migration was already signed off. Record: $script:SignOffPath"
+    }
+    if ($state.status -ne 'Verified') {
+        throw "Owner sign-off requires migration status 'Verified'; current status is '$($state.status)'."
+    }
+
+    $signOff = [ordered]@{
+        schemaVersion = 1
+        migrationIdentity = Get-MigrationIdentity $SourceUrl $DestinationUrl
+        source = $SourceUrl
+        destination = $DestinationUrl
+        owner = $Owner
+        approver = $SignOffApprover
+        approvalReference = $SignOffApprovalReference
+        status = 'Approved'
+        comments = $SignOffComments
+        technicalStatus = $state.status
+        technicalRunId = $state.runId
+        signedOffAt = (Get-Date).ToString('o')
+    }
+    Write-JsonFile -Path $script:SignOffPath -Data $signOff
+    Write-MigrationState 'SignedOff' $SourceUrl $DestinationUrl @{
+        event = 'OwnerSignOff'
+        approver = $SignOffApprover
+        approvalReference = $SignOffApprovalReference
+        signOffPath = $script:SignOffPath
+    }
+    Write-MigrationLog INFO "Owner sign-off recorded by $SignOffApprover with reference $SignOffApprovalReference."
+    return $signOff
 }
 
 function Invoke-Main {
@@ -886,13 +957,38 @@ function Invoke-Main {
             return
         }
 
+        if ($Operation -eq 'SignOff') {
+            $signOff = Invoke-OwnerSignOff `
+                $sourceUrl `
+                $destinationUrl `
+                $Approver `
+                $ApprovalReference `
+                $Comments
+            Write-JsonFile -Path $script:ResultPath -Data ([ordered]@{
+                runId = $script:RunId
+                status = 'SignedOff'
+                source = $sourceUrl
+                destination = $destinationUrl
+                owner = $Owner
+                approver = $signOff.approver
+                approvalReference = $signOff.approvalReference
+                comments = $signOff.comments
+                completedAt = $signOff.signedOffAt
+            })
+            return
+        }
+
         if ($Operation -eq 'Retry') {
-            Assert-RecoveryApproval
+            Assert-ApprovalMetadata 'Retry' $Approver $ApprovalReference
             $retryDescription = "retry migration after reconciliation using approval '$ApprovalReference'"
             if (-not $PSCmdlet.ShouldProcess($destinationUrl, $retryDescription)) {
                 throw 'Approved retry was not confirmed.'
             }
-            $verification = Invoke-ApprovedRetry $sourceUrl $destinationUrl
+            $verification = Invoke-ApprovedRetry `
+                $sourceUrl `
+                $destinationUrl `
+                $Approver `
+                $ApprovalReference
         }
         elseif ($Operation -eq 'Migrate') {
             Assert-MigrationCanStart $sourceUrl $destinationUrl
@@ -909,7 +1005,7 @@ function Invoke-Main {
             $verification = Invoke-Migration $sourceUrl $destinationUrl $sourceRefs
         }
         else {
-            throw "Operation '$Operation' is not implemented."
+            throw "Unsupported operation '$Operation'."
         }
 
         Write-MigrationLog INFO 'Migration and verification completed successfully. Owner sign-off remains manual.'

@@ -234,8 +234,6 @@ Describe 'Approved retry' {
         $script:RunDirectory = Join-Path $TestDrive 'approved-retry-run'
         $script:LogPath = Join-Path $script:RunDirectory 'migration.log'
         $script:StatePath = Join-Path $TestDrive 'approved-retry-state.json'
-        $script:Approver = 'test-approver'
-        $script:ApprovalReference = 'CHANGE-123'
         New-Item -ItemType Directory -Path $script:RunDirectory -Force | Out-Null
         Write-MigrationState `
             'PushStarted' `
@@ -255,7 +253,9 @@ Describe 'Approved retry' {
             -SourceRefs $sourceBranchTagRefs `
             -ApprovedRetry `
             -ExpectedSourceRefs $reconciliation.sourceRefs `
-            -ExpectedDestinationRefs $reconciliation.destinationRefs
+            -ExpectedDestinationRefs $reconciliation.destinationRefs `
+            -RecoveryApprover 'test-approver' `
+            -RecoveryApprovalReference 'CHANGE-123'
 
         $result.sourceRefCount | Should -Be 3
         $state = Get-MigrationState
@@ -273,6 +273,51 @@ Describe 'Approved retry' {
         (Get-ReconciliationResult `
             $repositories.sourceBare `
             $repositories.destinationBare).exactMatch | Should -BeTrue
+    }
+}
+
+Describe 'Owner sign-off' {
+    BeforeEach {
+        $script:RunDirectory = Join-Path $TestDrive 'sign-off-run'
+        $script:LogPath = Join-Path $script:RunDirectory 'migration.log'
+        $script:StatePath = Join-Path $TestDrive 'sign-off-state.json'
+        $script:SignOffPath = Join-Path $TestDrive 'owner-sign-off.json'
+        New-Item -ItemType Directory -Path $script:RunDirectory -Force | Out-Null
+    }
+
+    It 'records sign-off only after technical verification' {
+        $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
+        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        Write-MigrationState 'Verified' $sourceUrl $destinationUrl
+
+        $signOff = Invoke-OwnerSignOff `
+            $sourceUrl `
+            $destinationUrl `
+            'repository-owner' `
+            'CHANGE-456' `
+            'Migration accepted.'
+
+        $signOff.status | Should -Be 'Approved'
+        $signOff.approver | Should -Be 'repository-owner'
+        $signOff.approvalReference | Should -Be 'CHANGE-456'
+        (Get-MigrationState).status | Should -Be 'SignedOff'
+        Test-Path -LiteralPath $script:SignOffPath | Should -BeTrue
+    }
+
+    It 'rejects sign-off when verification has failed' {
+        $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
+        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        Write-MigrationState 'VerificationFailed' $sourceUrl $destinationUrl
+
+        {
+            Invoke-OwnerSignOff `
+                $sourceUrl `
+                $destinationUrl `
+                'repository-owner' `
+                'CHANGE-456' `
+                $null
+        } |
+            Should -Throw "*requires migration status 'Verified'*"
     }
 }
 
