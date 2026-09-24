@@ -83,21 +83,67 @@ Describe 'LFS object comparison' {
     }
 }
 
-Describe 'Persistent rerun guard' {
-    It 'allows a repository with no migration state' {
-        $script:StatePath = Join-Path $TestDrive 'missing-state.json'
-        { Assert-NoPriorPush } | Should -Not -Throw
+Describe 'Persistent migration state' {
+    BeforeAll {
+        $script:RunDirectory = Join-Path $TestDrive 'state-run'
+        $script:LogPath = Join-Path $script:RunDirectory 'migration.log'
+        New-Item -ItemType Directory -Path $script:RunDirectory -Force | Out-Null
     }
 
-    It 'blocks any repository with prior push state' {
-        $script:StatePath = Join-Path $TestDrive 'migration-state.json'
-        @{
-            runId = 'prior-run'
-            status = 'PushStarted'
-        } | ConvertTo-Json | Set-Content -LiteralPath $script:StatePath
+    It 'allows a repository with no migration state' {
+        $script:StatePath = Join-Path $TestDrive 'missing-state.json'
+        {
+            Assert-MigrationCanStart `
+                'https://bitbucket.org/test-workspace/test-source.git' `
+                'https://github.com/bcgov-c/test-destination.git'
+        } | Should -Not -Throw
+    }
 
-        { Assert-NoPriorPush } |
+    It 'allows retry after a pre-push state' {
+        $script:StatePath = Join-Path $TestDrive 'migration-state.json'
+        $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
+        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        Write-MigrationState 'CloneCompleted' $sourceUrl $destinationUrl
+
+        { Assert-MigrationCanStart $sourceUrl $destinationUrl } | Should -Not -Throw
+    }
+
+    It 'blocks a repository with prior push state' {
+        $script:StatePath = Join-Path $TestDrive 'post-push-state.json'
+        $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
+        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        Write-MigrationState 'PushStarted' $sourceUrl $destinationUrl
+
+        { Assert-MigrationCanStart $sourceUrl $destinationUrl } |
             Should -Throw "*status 'PushStarted'*reconcile*"
+    }
+
+    It 'preserves transition history' {
+        $script:StatePath = Join-Path $TestDrive 'history-state.json'
+        $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
+        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        Write-MigrationState 'NotStarted' $sourceUrl $destinationUrl
+        Write-MigrationState 'CloneCompleted' $sourceUrl $destinationUrl
+
+        $state = Get-MigrationState
+        $state.schemaVersion | Should -Be 2
+        $state.status | Should -Be 'CloneCompleted'
+        $state.history | Should -HaveCount 2
+        $state.history[0].status | Should -Be 'NotStarted'
+        $state.history[1].status | Should -Be 'CloneCompleted'
+    }
+
+    It 'rejects state for a different migration identity' {
+        $script:StatePath = Join-Path $TestDrive 'identity-state.json'
+        $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
+        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        Write-MigrationState 'CloneCompleted' $sourceUrl $destinationUrl
+
+        {
+            Assert-MigrationCanStart `
+                'https://bitbucket.org/test-workspace/other-source.git' `
+                $destinationUrl
+        } | Should -Throw '*different source, destination, owner, or LFS setting*'
     }
 }
 
