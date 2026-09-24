@@ -27,6 +27,8 @@ Deliver complete, usable vertical slices. The first slice migrates one repositor
 
 ## Phase 2: Harden single-repository recovery
 
+**Status:** In progress. State history, reconciliation, approved retry, ref-deletion protection, and owner sign-off are implemented. A complete local Git LFS integration test remains.
+
 **Outcome:** Operators can diagnose and safely recover interrupted or partially completed migrations without manually editing state.
 
 **Scope:**
@@ -129,4 +131,3 @@ Deliver complete, usable vertical slices. The first slice migrates one repositor
 4. Add the Phase 3 manifest only after the single-repository workflow and recovery procedure are proven.
 5. Add automated destination creation after repository governance and naming approval are settled.
 6. Complete the production hardening gate before broad migration.
-

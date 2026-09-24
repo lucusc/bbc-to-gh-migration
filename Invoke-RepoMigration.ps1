@@ -521,6 +521,7 @@ function Write-MigrationState {
     $previousState = Get-MigrationState
     $history = @()
     $createdAt = (Get-Date).ToString('o')
+    $verificationRunId = $null
     if ($null -ne $previousState) {
         Assert-StateIdentity $previousState $SourceUrl $DestinationUrl
         if ($previousState.PSObject.Properties.Name -contains 'history') {
@@ -529,6 +530,12 @@ function Write-MigrationState {
         if ($previousState.PSObject.Properties.Name -contains 'createdAt') {
             $createdAt = $previousState.createdAt
         }
+        if ($previousState.PSObject.Properties.Name -contains 'verificationRunId') {
+            $verificationRunId = $previousState.verificationRunId
+        }
+    }
+    if ($Status -eq 'Verified' -and ($null -eq $previousState -or $previousState.status -ne 'Verified')) {
+        $verificationRunId = $script:RunId
     }
 
     $transition = [ordered]@{
@@ -541,7 +548,7 @@ function Write-MigrationState {
     }
     $history += $transition
 
-    Write-JsonFile -Path $script:StatePath -Data ([ordered]@{
+    $stateData = [ordered]@{
         schemaVersion = 2
         migrationIdentity = Get-MigrationIdentity $SourceUrl $DestinationUrl
         runId = $script:RunId
@@ -553,7 +560,11 @@ function Write-MigrationState {
         createdAt = $createdAt
         updatedAt = (Get-Date).ToString('o')
         history = $history
-    })
+    }
+    if ($verificationRunId) {
+        $stateData.verificationRunId = $verificationRunId
+    }
+    Write-JsonFile -Path $script:StatePath -Data $stateData
 }
 
 function Write-RecoveryEvent {
@@ -902,7 +913,12 @@ function Invoke-OwnerSignOff {
         status = 'Approved'
         comments = $SignOffComments
         technicalStatus = $state.status
-        technicalRunId = $state.runId
+        technicalRunId = if ($state.PSObject.Properties.Name -contains 'verificationRunId') {
+            $state.verificationRunId
+        }
+        else {
+            $state.runId
+        }
         signedOffAt = (Get-Date).ToString('o')
     }
     Write-JsonFile -Path $script:SignOffPath -Data $signOff

@@ -289,6 +289,15 @@ Describe 'Owner sign-off' {
         $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
         $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
         Write-MigrationState 'Verified' $sourceUrl $destinationUrl
+        $verificationRunId = (Get-MigrationState).verificationRunId
+
+        $originalRunId = $script:RunId
+        $script:RunId = 'later-reconciliation-run'
+        Write-MigrationState 'Verified' $sourceUrl $destinationUrl @{
+            event = 'Reconciled'
+            exactMatch = $true
+        }
+        $script:RunId = $originalRunId
 
         $signOff = Invoke-OwnerSignOff `
             $sourceUrl `
@@ -300,6 +309,7 @@ Describe 'Owner sign-off' {
         $signOff.status | Should -Be 'Approved'
         $signOff.approver | Should -Be 'repository-owner'
         $signOff.approvalReference | Should -Be 'CHANGE-456'
+        $signOff.technicalRunId | Should -Be $verificationRunId
         (Get-MigrationState).status | Should -Be 'SignedOff'
         Test-Path -LiteralPath $script:SignOffPath | Should -BeTrue
     }
