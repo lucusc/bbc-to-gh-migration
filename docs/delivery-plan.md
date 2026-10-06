@@ -31,6 +31,12 @@ Deliver complete, usable vertical slices. The first slice migrates one repositor
 
 **Outcome:** Operators can diagnose and safely recover interrupted or partially completed migrations without manually editing state.
 
+**Remaining work:**
+
+- Add a local Git LFS end-to-end integration test that exercises source object fetch, destination push, clean destination download, `git lfs fsck`, and source/destination object inventory comparison.
+- Run the full Pester suite with Git LFS available and confirm the new integration test passes without skips.
+- Mark Phase 2 as implemented after the Git LFS integration test passes.
+
 **Scope:**
 
 - Expand durable state transitions:
