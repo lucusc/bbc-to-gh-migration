@@ -34,7 +34,7 @@ Deliver complete, usable vertical slices. The first slice migrates one repositor
 **Remaining work:**
 
 - Add a local Git LFS end-to-end integration test that exercises source object fetch, destination push, clean destination download, `git lfs fsck`, and source/destination object inventory comparison.
-- Run the full Pester suite with Git LFS available and confirm the new integration test passes without skips.
+- Run the full pytest suite on Windows and Linux with Git LFS available and confirm the new integration test passes without skips.
 - Mark Phase 2 as implemented after the Git LFS integration test passes.
 
 **Scope:**
@@ -74,7 +74,7 @@ Deliver complete, usable vertical slices. The first slice migrates one repositor
 - Add CSV or JSON manifest parsing.
 - Validate required mapping and approval fields.
 - Reject duplicate or conflicting mappings.
-- Add batch-wide `-PreflightOnly`.
+- Add batch-wide `--preflight-only`.
 - Add selection of one repository from the manifest.
 - Preflight the complete batch before modifying any destination.
 - Use isolated staging, logs, results, and state for every repository.
@@ -115,7 +115,7 @@ Deliver complete, usable vertical slices. The first slice migrates one repositor
 
 **Scope:**
 
-- Expand Pester coverage for command failures, state transitions, reconciliation, manifest validation, sign-off, and sanitization.
+- Expand pytest coverage for command failures, state transitions, reconciliation, manifest validation, sign-off, and sanitization.
 - Test annotated and lightweight tags, empty sources, unusual valid names, LFS failures, insufficient disk, and interrupted pushes.
 - Add operator procedures for authentication, preflight, migration, reconciliation, sign-off, and cleanup.
 - Add controlled cleanup that removes only explicitly selected successful staging directories after sign-off.

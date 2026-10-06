@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide a PowerShell-based, auditable process for migrating approved private repositories from Bitbucket Cloud to private repositories in an explicitly specified GitHub organization while preserving Git history, branches, tags, and Git LFS objects.
+Provide a cross-platform (Windows and Linux), Python-based, auditable process that runs from Windows Terminal or a bash shell without PowerShell for migrating approved private repositories from Bitbucket Cloud to private repositories in an explicitly specified GitHub organization while preserving Git history, branches, tags, and Git LFS objects.
 
 The process must prioritize data integrity and deliberate operator control over unattended throughput. A mirror push can delete destination refs that do not exist at the source, so the script must not blindly repeat a push.
 
@@ -10,8 +10,9 @@ The process must prioritize data integrity and deliberate operator control over 
 
 The migration machine must have:
 
-- PowerShell 7.
-- Git for Windows.
+- Windows or Linux.
+- Python 3.10 or later, using only the standard library.
+- Git (Git for Windows on Windows).
 - Git LFS, verified with `git lfs version`.
 - Git Credential Manager or another secure Git credential provider.
 - Network access to Bitbucket Cloud, GitHub, and the GitHub API.
@@ -94,14 +95,14 @@ Any failed preflight check must stop that migration before a mirror push begins.
 
 For each approved repository, the process must follow GitHub's documented mirror procedure:
 
-```powershell
+```bash
 git clone --mirror <source> <mirror-path>
 git --git-dir=<mirror-path> lfs fetch --all       # when LFS is used
 git --git-dir=<mirror-path> push --mirror <destination>
 git --git-dir=<mirror-path> lfs push --all <destination>  # when LFS is used
 ```
 
-Every unsuccessful native command must cause the repository migration to fail. PowerShell must explicitly inspect native command exit codes rather than relying only on `$ErrorActionPreference`.
+Every unsuccessful native command must cause the repository migration to fail. The tool must explicitly inspect native command exit codes.
 
 ## Verification requirements
 
@@ -182,8 +183,8 @@ A technically verified repository remains pending until owner sign-off is explic
 - Never embed credentials in URLs.
 - Never write credentials or authorization headers to logs.
 - Never disable TLS certificate verification.
-- Never use `Invoke-Expression` for command construction.
-- Pass native command arguments as discrete values.
+- Never run commands through a shell (`shell=True`, `eval`, or string-built command lines).
+- Pass native command arguments as discrete list values.
 - Reject unsafe repository names and path traversal.
 - Require an explicitly approved destination organization and reject unsafe organization names.
 - Fail closed when access, metadata, or verification cannot be determined.
