@@ -25,7 +25,16 @@ param(
     [string]$WorkingDirectory = (Join-Path $PSScriptRoot 'migration-work'),
 
     [ValidateRange(1, 10240)]
-    [int]$MinimumFreeSpaceGB = 5
+    [int]$MinimumFreeSpaceGB = 5,
+
+    [ValidateSet('Migrate', 'Reconcile', 'Retry', 'SignOff')]
+    [string]$Operation = 'Migrate',
+
+    [string]$Approver,
+
+    [string]$ApprovalReference,
+
+    [string]$Comments
 )
 
 Set-StrictMode -Version Latest
@@ -38,6 +47,7 @@ $script:RunDirectory = Join-Path $script:RepositoryDirectory $script:RunId
 $script:LogPath = Join-Path $script:RunDirectory 'migration.log'
 $script:ResultPath = Join-Path $script:RunDirectory 'result.json'
 $script:StatePath = Join-Path $script:RepositoryDirectory 'migration-state.json'
+$script:SignOffPath = Join-Path $script:RepositoryDirectory 'owner-sign-off.json'
 
 function ConvertTo-SafeText {
     param([AllowNull()][string]$Text)
@@ -63,6 +73,10 @@ function Write-MigrationLog {
     )
 
     $entry = '{0:o} [{1}] {2}' -f (Get-Date), $Level, (ConvertTo-SafeText $Message)
+    $logDirectory = Split-Path $script:LogPath -Parent
+    if (-not (Test-Path -LiteralPath $logDirectory)) {
+        New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+    }
     Write-Information $entry -InformationAction Continue
     Add-Content -LiteralPath $script:LogPath -Value $entry -Encoding utf8
 }
@@ -118,6 +132,93 @@ function Write-JsonFile {
     )
 
     $Data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Path -Encoding utf8
+}
+
+function Get-MigrationIdentity {
+    param(
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl
+    )
+
+    $identityText = '{0}|{1}|{2}|{3}' -f
+        $SourceUrl.ToLowerInvariant(),
+        $DestinationUrl.ToLowerInvariant(),
+        $Owner.Trim().ToLowerInvariant(),
+        ([bool]$UsesLfs).ToString().ToLowerInvariant()
+    $bytes = [Text.Encoding]::UTF8.GetBytes($identityText)
+    $hash = [Security.Cryptography.SHA256]::HashData($bytes)
+    return [Convert]::ToHexString($hash).ToLowerInvariant()
+}
+
+function Get-MigrationState {
+    if (-not (Test-Path -LiteralPath $script:StatePath)) {
+        return $null
+    }
+
+    try {
+        return Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "Migration state is unreadable and must be inspected manually: $script:StatePath"
+    }
+}
+
+function Assert-StateIdentity {
+    param(
+        [Parameter(Mandatory)]$State,
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl
+    )
+
+    $expectedIdentity = Get-MigrationIdentity $SourceUrl $DestinationUrl
+    if ($State.PSObject.Properties.Name -contains 'migrationIdentity') {
+        if ($State.migrationIdentity -ne $expectedIdentity) {
+            throw "Migration state belongs to a different source, destination, owner, or LFS setting: $script:StatePath"
+        }
+        return
+    }
+
+    $legacyMatches = $State.source -eq $SourceUrl -and
+        $State.destination -eq $DestinationUrl -and
+        $State.owner -eq $Owner -and
+        [bool]$State.usesLfs -eq [bool]$UsesLfs
+    if (-not $legacyMatches) {
+        throw "Legacy migration state does not match the requested migration: $script:StatePath"
+    }
+}
+
+function Test-IsPrePushState {
+    param([Parameter(Mandatory)][string]$Status)
+
+    return $Status -in @('NotStarted', 'CloneCompleted', 'LfsFetched')
+}
+
+function Test-IsPostPushState {
+    param([Parameter(Mandatory)][string]$Status)
+
+    return $Status -in @(
+        'PushStarted',
+        'GitPushCompleted',
+        'LfsPushCompleted',
+        'VerificationFailed',
+        'Verified',
+        'SignedOff'
+    )
+}
+
+function Assert-ApprovalMetadata {
+    param(
+        [Parameter(Mandatory)][string]$Action,
+        [AllowNull()][string]$ApproverValue,
+        [AllowNull()][string]$ApprovalReferenceValue
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ApproverValue)) {
+        throw "$Action requires -Approver."
+    }
+    if ([string]::IsNullOrWhiteSpace($ApprovalReferenceValue)) {
+        throw "$Action requires -ApprovalReference."
+    }
 }
 
 function Assert-SafeRepositoryName {
@@ -253,6 +354,18 @@ function ConvertTo-RefMap {
     return $refs
 }
 
+function Get-ComparableRemoteRefMap {
+    param(
+        [Parameter(Mandatory)][string]$RemoteUrl,
+        [switch]$BranchesAndTagsOnly
+    )
+
+    $lines = @(Get-RemoteRefLines $RemoteUrl -BranchesAndTagsOnly:$BranchesAndTagsOnly)
+    $refs = ConvertTo-RefMap $lines
+    $refs.Remove('HEAD')
+    return $refs
+}
+
 function Compare-RefMaps {
     param(
         [Parameter(Mandatory)][System.Collections.IDictionary]$SourceRefs,
@@ -279,6 +392,45 @@ function Compare-RefMaps {
     }
 
     return $differences.ToArray()
+}
+
+function Get-ReconciliationResult {
+    param(
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl
+    )
+
+    $sourceRefs = Get-ComparableRemoteRefMap $SourceUrl
+    $destinationRefs = Get-ComparableRemoteRefMap $DestinationUrl
+    $differences = @(Compare-RefMaps $sourceRefs $destinationRefs)
+    $missingDestinationRefs = @($differences | Where-Object { $_ -like 'Missing destination ref:*' })
+    $unexpectedDestinationRefs = @($differences | Where-Object { $_ -like 'Unexpected destination ref:*' })
+    $hashMismatches = @($differences | Where-Object { $_ -like 'Hash mismatch for *' })
+
+    return [ordered]@{
+        sourceRefs = $sourceRefs
+        destinationRefs = $destinationRefs
+        differences = $differences
+        exactMatch = $differences.Count -eq 0
+        sourceRefCount = $sourceRefs.Count
+        destinationRefCount = $destinationRefs.Count
+        missingDestinationRefCount = $missingDestinationRefs.Count
+        unexpectedDestinationRefCount = $unexpectedDestinationRefs.Count
+        hashMismatchCount = $hashMismatches.Count
+    }
+}
+
+function Assert-RefSnapshotUnchanged {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Expected,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Actual,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    $differences = @(Compare-RefMaps $Expected $Actual)
+    if ($differences.Count -gt 0) {
+        throw "$Description changed after reconciliation. Run reconciliation again before retrying."
+    }
 }
 
 function Get-LfsObjectIds {
@@ -334,31 +486,105 @@ function Compare-StringSets {
     return $differences
 }
 
-function Assert-NoPriorPush {
-    if (-not (Test-Path -LiteralPath $script:StatePath)) {
+function Assert-MigrationCanStart {
+    param(
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl
+    )
+
+    $state = Get-MigrationState
+    if ($null -eq $state) {
         return
     }
 
-    $state = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
-    throw "A prior migration state exists with status '$($state.status)' from run '$($state.runId)'. Reconcile source and destination refs before any further mirror push. State: $script:StatePath"
+    Assert-StateIdentity $state $SourceUrl $DestinationUrl
+    if (Test-IsPrePushState $state.status) {
+        Write-MigrationLog WARN "Retrying after pre-push state '$($state.status)' from run '$($state.runId)'."
+        return
+    }
+
+    if (Test-IsPostPushState $state.status) {
+        throw "A prior migration reached post-push status '$($state.status)' in run '$($state.runId)'. Reconcile source and destination before any further push. State: $script:StatePath"
+    }
+
+    throw "Migration state has unsupported status '$($state.status)': $script:StatePath"
 }
 
 function Write-MigrationState {
     param(
         [Parameter(Mandatory)][string]$Status,
         [Parameter(Mandatory)][string]$SourceUrl,
-        [Parameter(Mandatory)][string]$DestinationUrl
+        [Parameter(Mandatory)][string]$DestinationUrl,
+        [System.Collections.IDictionary]$Details = @{}
     )
 
-    Write-JsonFile -Path $script:StatePath -Data ([ordered]@{
+    $previousState = Get-MigrationState
+    $history = @()
+    $createdAt = (Get-Date).ToString('o')
+    $verificationRunId = $null
+    if ($null -ne $previousState) {
+        Assert-StateIdentity $previousState $SourceUrl $DestinationUrl
+        if ($previousState.PSObject.Properties.Name -contains 'history') {
+            $history = @($previousState.history)
+        }
+        if ($previousState.PSObject.Properties.Name -contains 'createdAt') {
+            $createdAt = $previousState.createdAt
+        }
+        if ($previousState.PSObject.Properties.Name -contains 'verificationRunId') {
+            $verificationRunId = $previousState.verificationRunId
+        }
+    }
+    if ($Status -eq 'Verified' -and ($null -eq $previousState -or $previousState.status -ne 'Verified')) {
+        $verificationRunId = $script:RunId
+    }
+
+    $transition = [ordered]@{
+        runId = $script:RunId
+        status = $Status
+        at = (Get-Date).ToString('o')
+    }
+    if ($Details.Count -gt 0) {
+        $transition.details = $Details
+    }
+    $history += $transition
+
+    $stateData = [ordered]@{
+        schemaVersion = 2
+        migrationIdentity = Get-MigrationIdentity $SourceUrl $DestinationUrl
         runId = $script:RunId
         status = $Status
         source = $SourceUrl
         destination = $DestinationUrl
         owner = $Owner
         usesLfs = [bool]$UsesLfs
+        createdAt = $createdAt
         updatedAt = (Get-Date).ToString('o')
-    })
+        history = $history
+    }
+    if ($verificationRunId) {
+        $stateData.verificationRunId = $verificationRunId
+    }
+    Write-JsonFile -Path $script:StatePath -Data $stateData
+}
+
+function Write-RecoveryEvent {
+    param(
+        [Parameter(Mandatory)][string]$Event,
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl,
+        [Parameter(Mandatory)][string]$RecoveryApprover,
+        [Parameter(Mandatory)][string]$RecoveryApprovalReference
+    )
+
+    $state = Get-MigrationState
+    if ($null -eq $state -or -not (Test-IsPostPushState $state.status)) {
+        throw 'Recovery events require an existing post-push migration state.'
+    }
+    Write-MigrationState $state.status $SourceUrl $DestinationUrl @{
+        event = $Event
+        approver = $RecoveryApprover
+        approvalReference = $RecoveryApprovalReference
+    }
 }
 
 function Invoke-Preflight {
@@ -401,73 +627,164 @@ function Invoke-Preflight {
     return $sourceRefs
 }
 
+function Invoke-ReconciliationPreflight {
+    param(
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl
+    )
+
+    Write-MigrationLog INFO 'Starting reconciliation access checks.'
+    Assert-CommandAvailable git
+    Invoke-NativeCommand git @('--version')
+    Assert-TlsVerification
+
+    [void](Get-RemoteRefLines $SourceUrl)
+    $metadata = Get-GitHubRepositoryMetadata $GitHubRepo
+    if ($metadata.owner.login -ine $script:GitHubOrganization) {
+        throw "Destination repository is not owned by $script:GitHubOrganization."
+    }
+    if (-not $metadata.private) {
+        throw 'Destination GitHub repository must be private.'
+    }
+    if (-not $metadata.permissions.push) {
+        throw 'Authenticated GitHub identity does not have push permission on the destination.'
+    }
+    [void](Get-RemoteRefLines $DestinationUrl)
+    Write-MigrationLog INFO 'Reconciliation access checks completed successfully.'
+}
+
 function Invoke-Migration {
     param(
         [Parameter(Mandatory)][string]$SourceUrl,
         [Parameter(Mandatory)][string]$DestinationUrl,
-        [Parameter(Mandatory)][System.Collections.IDictionary]$SourceRefs
+        [Parameter(Mandatory)][System.Collections.IDictionary]$SourceRefs,
+        [switch]$ApprovedRetry,
+        [switch]$SkipGitPush,
+        [System.Collections.IDictionary]$ExpectedSourceRefs,
+        [System.Collections.IDictionary]$ExpectedDestinationRefs,
+        [string]$RecoveryApprover,
+        [string]$RecoveryApprovalReference
     )
 
     $mirrorPath = Join-Path $script:RunDirectory "$BitbucketRepo.git"
     $verificationPath = Join-Path $script:RunDirectory 'destination-verification'
 
     Invoke-NativeCommand git @('clone', '--mirror', $SourceUrl, $mirrorPath)
+    if ($ApprovedRetry) {
+        Write-RecoveryEvent `
+            'RecoveryCloneCompleted' `
+            $SourceUrl `
+            $DestinationUrl `
+            $RecoveryApprover `
+            $RecoveryApprovalReference
+    }
+    else {
+        Write-MigrationState 'CloneCompleted' $SourceUrl $DestinationUrl
+    }
 
     $sourceLfsObjectIds = @()
     if ($UsesLfs) {
         Assert-FreeDiskSpace
         Invoke-NativeCommand git @("--git-dir=$mirrorPath", 'lfs', 'fetch', '--all')
         $sourceLfsObjectIds = @(Get-LfsObjectIds $mirrorPath -Bare)
+        if ($ApprovedRetry) {
+            Write-RecoveryEvent `
+                'RecoveryLfsFetched' `
+                $SourceUrl `
+                $DestinationUrl `
+                $RecoveryApprover `
+                $RecoveryApprovalReference
+        }
+        else {
+            Write-MigrationState 'LfsFetched' $SourceUrl $DestinationUrl
+        }
         Write-MigrationLog INFO "Fetched $($sourceLfsObjectIds.Count) unique LFS objects from the source."
     }
 
-    $destinationRefs = @(Get-RemoteRefLines $DestinationUrl)
-    if ($destinationRefs.Count -ne 0) {
-        throw 'Destination gained refs after preflight. Mirror push has been blocked.'
+    if ($ApprovedRetry) {
+        $currentSourceRefs = Get-ComparableRemoteRefMap $SourceUrl
+        $currentDestinationRefs = Get-ComparableRemoteRefMap $DestinationUrl
+        Assert-RefSnapshotUnchanged $ExpectedSourceRefs $currentSourceRefs 'Source refs'
+        Assert-RefSnapshotUnchanged $ExpectedDestinationRefs $currentDestinationRefs 'Destination refs'
+    }
+    else {
+        $destinationRefs = @(Get-RemoteRefLines $DestinationUrl)
+        if ($destinationRefs.Count -ne 0) {
+            throw 'Destination gained refs after preflight. Mirror push has been blocked.'
+        }
     }
 
-    Write-MigrationState 'PushStarted' $SourceUrl $DestinationUrl
-    Invoke-NativeCommand git @("--git-dir=$mirrorPath", 'push', '--mirror', $DestinationUrl)
-    Write-MigrationState 'GitPushCompleted' $SourceUrl $DestinationUrl
+    if (-not $SkipGitPush) {
+        $pushDetails = @{}
+        if ($ApprovedRetry) {
+            $pushDetails = @{
+                approvedRetry = $true
+                approver = $RecoveryApprover
+                approvalReference = $RecoveryApprovalReference
+            }
+        }
+        Write-MigrationState 'PushStarted' $SourceUrl $DestinationUrl $pushDetails
+        Invoke-NativeCommand git @("--git-dir=$mirrorPath", 'push', '--mirror', $DestinationUrl)
+        Write-MigrationState 'GitPushCompleted' $SourceUrl $DestinationUrl $pushDetails
+    }
+    else {
+        Write-MigrationLog INFO 'Git refs already match; mirror push is not required.'
+    }
 
     if ($UsesLfs) {
         Invoke-NativeCommand git @("--git-dir=$mirrorPath", 'lfs', 'push', '--all', $DestinationUrl)
-        Write-MigrationState 'LfsPushCompleted' $SourceUrl $DestinationUrl
+        $lfsDetails = @{}
+        if ($ApprovedRetry) {
+            $lfsDetails = @{
+                approvedRetry = $true
+                approver = $RecoveryApprover
+                approvalReference = $RecoveryApprovalReference
+            }
+        }
+        Write-MigrationState 'LfsPushCompleted' $SourceUrl $DestinationUrl $lfsDetails
     }
 
-    $destinationRefLines = @(Get-RemoteRefLines $DestinationUrl -BranchesAndTagsOnly)
-    $destinationRefMap = ConvertTo-RefMap $destinationRefLines
-    $refDifferences = @(Compare-RefMaps $SourceRefs $destinationRefMap)
-    if ($refDifferences.Count -gt 0) {
-        foreach ($difference in $refDifferences) {
-            Write-MigrationLog ERROR $difference
-        }
-        throw "Source and destination refs differ in $($refDifferences.Count) place(s)."
-    }
-    Write-MigrationLog INFO "Verified $($SourceRefs.Count) source branch/tag ref entries against the destination."
-
-    $destinationLfsObjectIds = @()
-    if ($UsesLfs) {
-        $previousSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
-        $env:GIT_LFS_SKIP_SMUDGE = '1'
-        try {
-            Invoke-NativeCommand git @('clone', '--no-checkout', $DestinationUrl, $verificationPath)
-        }
-        finally {
-            $env:GIT_LFS_SKIP_SMUDGE = $previousSkipSmudge
-        }
-
-        Invoke-NativeCommand git @('-C', $verificationPath, 'lfs', 'fetch', '--all')
-        Invoke-NativeCommand git @('-C', $verificationPath, 'lfs', 'fsck')
-        $destinationLfsObjectIds = @(Get-LfsObjectIds $verificationPath)
-        $lfsDifferences = @(Compare-StringSets $sourceLfsObjectIds $destinationLfsObjectIds 'LFS object')
-        if ($lfsDifferences.Count -gt 0) {
-            foreach ($difference in $lfsDifferences) {
+    try {
+        $destinationRefLines = @(Get-RemoteRefLines $DestinationUrl -BranchesAndTagsOnly)
+        $destinationRefMap = ConvertTo-RefMap $destinationRefLines
+        $refDifferences = @(Compare-RefMaps $SourceRefs $destinationRefMap)
+        if ($refDifferences.Count -gt 0) {
+            foreach ($difference in $refDifferences) {
                 Write-MigrationLog ERROR $difference
             }
-            throw "Source and destination LFS object inventories differ in $($lfsDifferences.Count) place(s)."
+            throw "Source and destination refs differ in $($refDifferences.Count) place(s)."
         }
-        Write-MigrationLog INFO "Verified $($sourceLfsObjectIds.Count) unique LFS object IDs from the destination."
+        Write-MigrationLog INFO "Verified $($SourceRefs.Count) source branch/tag ref entries against the destination."
+
+        $destinationLfsObjectIds = @()
+        if ($UsesLfs) {
+            $previousSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
+            $env:GIT_LFS_SKIP_SMUDGE = '1'
+            try {
+                Invoke-NativeCommand git @('clone', '--no-checkout', $DestinationUrl, $verificationPath)
+            }
+            finally {
+                $env:GIT_LFS_SKIP_SMUDGE = $previousSkipSmudge
+            }
+
+            Invoke-NativeCommand git @('-C', $verificationPath, 'lfs', 'fetch', '--all')
+            Invoke-NativeCommand git @('-C', $verificationPath, 'lfs', 'fsck')
+            $destinationLfsObjectIds = @(Get-LfsObjectIds $verificationPath)
+            $lfsDifferences = @(Compare-StringSets $sourceLfsObjectIds $destinationLfsObjectIds 'LFS object')
+            if ($lfsDifferences.Count -gt 0) {
+                foreach ($difference in $lfsDifferences) {
+                    Write-MigrationLog ERROR $difference
+                }
+                throw "Source and destination LFS object inventories differ in $($lfsDifferences.Count) place(s)."
+            }
+            Write-MigrationLog INFO "Verified $($sourceLfsObjectIds.Count) unique LFS object IDs from the destination."
+        }
+    }
+    catch {
+        Write-MigrationState 'VerificationFailed' $SourceUrl $DestinationUrl @{
+            error = ConvertTo-SafeText $_.Exception.Message
+        }
+        throw
     }
 
     Write-MigrationState 'Verified' $SourceUrl $DestinationUrl
@@ -477,6 +794,142 @@ function Invoke-Migration {
         sourceLfsObjectCount = $sourceLfsObjectIds.Count
         destinationLfsObjectCount = $destinationLfsObjectIds.Count
     }
+}
+
+function Invoke-Reconciliation {
+    param(
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl
+    )
+
+    $state = Get-MigrationState
+    if ($null -eq $state) {
+        throw "No migration state exists to reconcile: $script:StatePath"
+    }
+    Assert-StateIdentity $state $SourceUrl $DestinationUrl
+    if (-not (Test-IsPostPushState $state.status)) {
+        throw "Reconciliation is only required after push begins; current status is '$($state.status)'."
+    }
+
+    Invoke-ReconciliationPreflight $SourceUrl $DestinationUrl
+    $reconciliation = Get-ReconciliationResult $SourceUrl $DestinationUrl
+    foreach ($difference in $reconciliation.differences) {
+        Write-MigrationLog WARN $difference
+    }
+    if ($reconciliation.exactMatch) {
+        Write-MigrationLog INFO 'Source and destination refs match exactly.'
+    }
+
+    Write-MigrationState $state.status $SourceUrl $DestinationUrl @{
+        event = 'Reconciled'
+        exactMatch = $reconciliation.exactMatch
+        sourceRefCount = $reconciliation.sourceRefCount
+        destinationRefCount = $reconciliation.destinationRefCount
+        unexpectedDestinationRefCount = $reconciliation.unexpectedDestinationRefCount
+    }
+
+    return $reconciliation
+}
+
+function Invoke-ApprovedRetry {
+    param(
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl,
+        [Parameter(Mandatory)][string]$RecoveryApprover,
+        [Parameter(Mandatory)][string]$RecoveryApprovalReference
+    )
+
+    Assert-ApprovalMetadata 'Retry' $RecoveryApprover $RecoveryApprovalReference
+    $state = Get-MigrationState
+    if ($null -eq $state) {
+        throw "No migration state exists to retry: $script:StatePath"
+    }
+    Assert-StateIdentity $state $SourceUrl $DestinationUrl
+    if ($state.status -in @('Verified', 'SignedOff')) {
+        throw "Migration status '$($state.status)' cannot be retried."
+    }
+    if (-not (Test-IsPostPushState $state.status)) {
+        throw "Use normal migration retry for pre-push status '$($state.status)'."
+    }
+
+    Invoke-ReconciliationPreflight $SourceUrl $DestinationUrl
+    Assert-FreeDiskSpace
+    if ($UsesLfs) {
+        Invoke-NativeCommand git @('lfs', 'version')
+    }
+
+    $reconciliation = Get-ReconciliationResult $SourceUrl $DestinationUrl
+    foreach ($difference in $reconciliation.differences) {
+        Write-MigrationLog WARN $difference
+    }
+    if ($reconciliation.unexpectedDestinationRefCount -gt 0) {
+        throw "Retry is blocked because the destination has $($reconciliation.unexpectedDestinationRefCount) ref(s) absent from the source."
+    }
+
+    $sourceBranchTagRefs = Get-ComparableRemoteRefMap $SourceUrl -BranchesAndTagsOnly
+    $skipGitPush = $reconciliation.exactMatch
+    return Invoke-Migration `
+        -SourceUrl $SourceUrl `
+        -DestinationUrl $DestinationUrl `
+        -SourceRefs $sourceBranchTagRefs `
+        -ApprovedRetry `
+        -SkipGitPush:$skipGitPush `
+        -ExpectedSourceRefs $reconciliation.sourceRefs `
+        -ExpectedDestinationRefs $reconciliation.destinationRefs `
+        -RecoveryApprover $RecoveryApprover `
+        -RecoveryApprovalReference $RecoveryApprovalReference
+}
+
+function Invoke-OwnerSignOff {
+    param(
+        [Parameter(Mandatory)][string]$SourceUrl,
+        [Parameter(Mandatory)][string]$DestinationUrl,
+        [Parameter(Mandatory)][string]$SignOffApprover,
+        [Parameter(Mandatory)][string]$SignOffApprovalReference,
+        [AllowNull()][string]$SignOffComments
+    )
+
+    Assert-ApprovalMetadata 'Sign-off' $SignOffApprover $SignOffApprovalReference
+    $state = Get-MigrationState
+    if ($null -eq $state) {
+        throw "No migration state exists to sign off: $script:StatePath"
+    }
+    Assert-StateIdentity $state $SourceUrl $DestinationUrl
+    if ($state.status -eq 'SignedOff') {
+        throw "Migration was already signed off. Record: $script:SignOffPath"
+    }
+    if ($state.status -ne 'Verified') {
+        throw "Owner sign-off requires migration status 'Verified'; current status is '$($state.status)'."
+    }
+
+    $signOff = [ordered]@{
+        schemaVersion = 1
+        migrationIdentity = Get-MigrationIdentity $SourceUrl $DestinationUrl
+        source = $SourceUrl
+        destination = $DestinationUrl
+        owner = $Owner
+        approver = $SignOffApprover
+        approvalReference = $SignOffApprovalReference
+        status = 'Approved'
+        comments = $SignOffComments
+        technicalStatus = $state.status
+        technicalRunId = if ($state.PSObject.Properties.Name -contains 'verificationRunId') {
+            $state.verificationRunId
+        }
+        else {
+            $state.runId
+        }
+        signedOffAt = (Get-Date).ToString('o')
+    }
+    Write-JsonFile -Path $script:SignOffPath -Data $signOff
+    Write-MigrationState 'SignedOff' $SourceUrl $DestinationUrl @{
+        event = 'OwnerSignOff'
+        approver = $SignOffApprover
+        approvalReference = $SignOffApprovalReference
+        signOffPath = $script:SignOffPath
+    }
+    Write-MigrationLog INFO "Owner sign-off recorded by $SignOffApprover with reference $SignOffApprovalReference."
+    return $signOff
 }
 
 function Invoke-Main {
@@ -498,18 +951,79 @@ function Invoke-Main {
         Write-MigrationLog INFO "Source: $sourceUrl"
         Write-MigrationLog INFO "Destination: $destinationUrl"
         Write-MigrationLog INFO "Uses LFS: $UsesLfs"
+        Write-MigrationLog INFO "Operation: $Operation"
 
-        Assert-NoPriorPush
-        $sourceRefLines = Invoke-Preflight $sourceUrl $destinationUrl
-        $sourceRefs = ConvertTo-RefMap $sourceRefLines
-        Write-MigrationLog INFO 'Preflight completed successfully.'
-
-        $migrationDescription = "mirror $sourceUrl to $destinationUrl"
-        if (-not $PSCmdlet.ShouldProcess($destinationUrl, $migrationDescription)) {
-            throw 'Migration was not approved.'
+        if ($Operation -eq 'Reconcile') {
+            $reconciliation = Invoke-Reconciliation $sourceUrl $destinationUrl
+            Write-JsonFile -Path $script:ResultPath -Data ([ordered]@{
+                runId = $script:RunId
+                status = 'Reconciled'
+                source = $sourceUrl
+                destination = $destinationUrl
+                priorMigrationStatus = (Get-MigrationState).status
+                exactMatch = $reconciliation.exactMatch
+                sourceRefCount = $reconciliation.sourceRefCount
+                destinationRefCount = $reconciliation.destinationRefCount
+                missingDestinationRefCount = $reconciliation.missingDestinationRefCount
+                unexpectedDestinationRefCount = $reconciliation.unexpectedDestinationRefCount
+                hashMismatchCount = $reconciliation.hashMismatchCount
+                differences = $reconciliation.differences
+                completedAt = (Get-Date).ToString('o')
+            })
+            return
         }
 
-        $verification = Invoke-Migration $sourceUrl $destinationUrl $sourceRefs
+        if ($Operation -eq 'SignOff') {
+            $signOff = Invoke-OwnerSignOff `
+                $sourceUrl `
+                $destinationUrl `
+                $Approver `
+                $ApprovalReference `
+                $Comments
+            Write-JsonFile -Path $script:ResultPath -Data ([ordered]@{
+                runId = $script:RunId
+                status = 'SignedOff'
+                source = $sourceUrl
+                destination = $destinationUrl
+                owner = $Owner
+                approver = $signOff.approver
+                approvalReference = $signOff.approvalReference
+                comments = $signOff.comments
+                completedAt = $signOff.signedOffAt
+            })
+            return
+        }
+
+        if ($Operation -eq 'Retry') {
+            Assert-ApprovalMetadata 'Retry' $Approver $ApprovalReference
+            $retryDescription = "retry migration after reconciliation using approval '$ApprovalReference'"
+            if (-not $PSCmdlet.ShouldProcess($destinationUrl, $retryDescription)) {
+                throw 'Approved retry was not confirmed.'
+            }
+            $verification = Invoke-ApprovedRetry `
+                $sourceUrl `
+                $destinationUrl `
+                $Approver `
+                $ApprovalReference
+        }
+        elseif ($Operation -eq 'Migrate') {
+            Assert-MigrationCanStart $sourceUrl $destinationUrl
+            Write-MigrationState 'NotStarted' $sourceUrl $destinationUrl
+            $sourceRefLines = Invoke-Preflight $sourceUrl $destinationUrl
+            $sourceRefs = ConvertTo-RefMap $sourceRefLines
+            Write-MigrationLog INFO 'Preflight completed successfully.'
+
+            $migrationDescription = "mirror $sourceUrl to $destinationUrl"
+            if (-not $PSCmdlet.ShouldProcess($destinationUrl, $migrationDescription)) {
+                throw 'Migration was not approved.'
+            }
+
+            $verification = Invoke-Migration $sourceUrl $destinationUrl $sourceRefs
+        }
+        else {
+            throw "Unsupported operation '$Operation'."
+        }
+
         Write-MigrationLog INFO 'Migration and verification completed successfully. Owner sign-off remains manual.'
 
         Write-JsonFile -Path $script:ResultPath -Data ([ordered]@{
@@ -523,6 +1037,9 @@ function Invoke-Main {
             destinationRefCount = $verification.destinationRefCount
             sourceLfsObjectCount = $verification.sourceLfsObjectCount
             destinationLfsObjectCount = $verification.destinationLfsObjectCount
+            operation = $Operation
+            approver = if ($Operation -eq 'Retry') { $Approver } else { $null }
+            approvalReference = if ($Operation -eq 'Retry') { $ApprovalReference } else { $null }
             completedAt = (Get-Date).ToString('o')
         })
     }

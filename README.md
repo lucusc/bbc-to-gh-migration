@@ -19,7 +19,7 @@ Detailed project documentation:
 
 Authenticate using Git Credential Manager or GitHub CLI. Do not put credentials in repository URLs or script arguments. TLS certificate verification must remain enabled.
 
-## Usage
+## Initial migration
 
 ```powershell
 .\Invoke-RepoMigration.ps1 `
@@ -46,6 +46,59 @@ The script:
 The script writes `migration-state.json` immediately before the mirror push. Any later run for the same source repository is blocked, including after a successful migration. Reconcile the source and destination manually before removing or changing this guard; a repeated mirror push can delete destination-only refs.
 
 Use `-Confirm:$false` only when the complete source and destination mapping has already received explicit approval.
+
+## Reconciliation
+
+After a push starts, normal migration runs are blocked. Compare the current source and destination without modifying either repository:
+
+```powershell
+.\Invoke-RepoMigration.ps1 `
+  -BitbucketWorkspace "workspace" `
+  -BitbucketRepo "source-repo" `
+  -GitHubRepo "destination-repo" `
+  -Owner "responsible-owner" `
+  -WorkingDirectory "D:\repo-migrations" `
+  -Operation Reconcile
+```
+
+The result lists missing, additional, and mismatched refs. Destination-only refs block automated recovery because a repeated mirror push would delete them.
+
+## Approved retry
+
+Retry after push begins only with repository-specific approval:
+
+```powershell
+.\Invoke-RepoMigration.ps1 `
+  -BitbucketWorkspace "workspace" `
+  -BitbucketRepo "source-repo" `
+  -GitHubRepo "destination-repo" `
+  -Owner "responsible-owner" `
+  -WorkingDirectory "D:\repo-migrations" `
+  -Operation Retry `
+  -Approver "approver-name" `
+  -ApprovalReference "CHANGE-1234"
+```
+
+The script reconciles again, blocks destination-only refs, and confirms that source and destination snapshots have not changed before pushing. If refs already match, the Git mirror push is skipped and verification continues. LFS objects are still pushed when the repository uses LFS.
+
+## Owner sign-off
+
+After technical verification:
+
+```powershell
+.\Invoke-RepoMigration.ps1 `
+  -BitbucketWorkspace "workspace" `
+  -BitbucketRepo "source-repo" `
+  -GitHubRepo "destination-repo" `
+  -Owner "responsible-owner" `
+  -WorkingDirectory "D:\repo-migrations" `
+  -Operation SignOff `
+  -Approver "repository-owner" `
+  -ApprovalReference "CHANGE-1234" `
+  -Comments "Migration accepted."
+```
+
+Sign-off is rejected unless the durable migration state is `Verified`. The approval is written to `owner-sign-off.json`, and the migration state advances to `SignedOff`.
 
 ## Tests
 
