@@ -7,6 +7,18 @@ Detailed project documentation:
 - [Migration requirements](docs/requirements.md)
 - [Vertical delivery plan](docs/delivery-plan.md)
 
+## Code structure
+
+The migration implementation is split by responsibility while `repo_migration.py`
+continues to provide the command-line entry point and the public `Migration` API:
+
+- `migration_utils.py` contains shared constants, validation, comparison, and JSON helpers.
+- `migration_execution.py` contains sanitized logging and native command execution.
+- `migration_state.py` contains durable state transitions and recovery identity checks.
+- `migration_preflight.py` contains environment, TLS, disk, and GitHub metadata checks.
+- `migration_git.py` contains Git ref and LFS inventory operations.
+- `migration_workflow.py` contains migration, reconciliation, retry, and sign-off workflows.
+
 ## Prerequisites
 
 - Python 3.10 or later (standard library only; no packages to install)
