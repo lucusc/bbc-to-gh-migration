@@ -8,11 +8,11 @@ Deliver complete, usable vertical slices. The first slice migrates one repositor
 
 **Status:** Implemented.
 
-**Outcome:** An operator can migrate one approved private Bitbucket Cloud repository to a pre-created, empty private repository in `bcgov-c`.
+**Outcome:** An operator can migrate one approved private Bitbucket Cloud repository to a pre-created, empty private repository in an explicitly specified GitHub organization.
 
 **Delivered capabilities:**
 
-- Parameters for workspace, source repository, destination repository, owner, LFS use, working directory, and disk threshold.
+- Parameters for workspace, source repository, GitHub organization, destination repository, owner, LFS use, working directory, and disk threshold.
 - Tool, TLS, disk, authentication, destination metadata, permission, and emptiness preflight.
 - Explicit confirmation before migration.
 - Mirror clone and mirror push.
@@ -96,7 +96,7 @@ Deliver complete, usable vertical slices. The first slice migrates one repositor
 
 - Add an explicit destination-creation mode using GitHub CLI.
 - Validate `gh` availability and authenticated organization access.
-- Create repositories only in `bcgov-c`.
+- Create repositories only in the explicitly approved GitHub organization.
 - Create repositories as private and uninitialized.
 - Confirm repository privacy and push permission after creation.
 - Never recreate or replace an existing repository.

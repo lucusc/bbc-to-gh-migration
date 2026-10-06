@@ -3,6 +3,7 @@ BeforeAll {
     . $scriptPath `
         -BitbucketWorkspace 'test-workspace' `
         -BitbucketRepo 'test-source' `
+        -GitHubOrganization 'test-org' `
         -GitHubRepo 'test-destination' `
         -Owner 'test-owner' `
         -WorkingDirectory $TestDrive
@@ -128,14 +129,14 @@ Describe 'Persistent migration state' {
         {
             Assert-MigrationCanStart `
                 'https://bitbucket.org/test-workspace/test-source.git' `
-                'https://github.com/bcgov-c/test-destination.git'
+                'https://github.com/test-org/test-destination.git'
         } | Should -Not -Throw
     }
 
     It 'allows retry after a pre-push state' {
         $script:StatePath = Join-Path $TestDrive 'migration-state.json'
         $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
-        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        $destinationUrl = 'https://github.com/test-org/test-destination.git'
         Write-MigrationState 'CloneCompleted' $sourceUrl $destinationUrl
 
         { Assert-MigrationCanStart $sourceUrl $destinationUrl } | Should -Not -Throw
@@ -144,7 +145,7 @@ Describe 'Persistent migration state' {
     It 'blocks a repository with prior push state' {
         $script:StatePath = Join-Path $TestDrive 'post-push-state.json'
         $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
-        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        $destinationUrl = 'https://github.com/test-org/test-destination.git'
         Write-MigrationState 'PushStarted' $sourceUrl $destinationUrl
 
         { Assert-MigrationCanStart $sourceUrl $destinationUrl } |
@@ -154,7 +155,7 @@ Describe 'Persistent migration state' {
     It 'preserves transition history' {
         $script:StatePath = Join-Path $TestDrive 'history-state.json'
         $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
-        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        $destinationUrl = 'https://github.com/test-org/test-destination.git'
         Write-MigrationState 'NotStarted' $sourceUrl $destinationUrl
         Write-MigrationState 'CloneCompleted' $sourceUrl $destinationUrl
 
@@ -169,7 +170,7 @@ Describe 'Persistent migration state' {
     It 'rejects state for a different migration identity' {
         $script:StatePath = Join-Path $TestDrive 'identity-state.json'
         $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
-        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        $destinationUrl = 'https://github.com/test-org/test-destination.git'
         Write-MigrationState 'CloneCompleted' $sourceUrl $destinationUrl
 
         {
@@ -287,7 +288,7 @@ Describe 'Owner sign-off' {
 
     It 'records sign-off only after technical verification' {
         $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
-        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        $destinationUrl = 'https://github.com/test-org/test-destination.git'
         Write-MigrationState 'Verified' $sourceUrl $destinationUrl
         $verificationRunId = (Get-MigrationState).verificationRunId
 
@@ -316,7 +317,7 @@ Describe 'Owner sign-off' {
 
     It 'rejects sign-off when verification has failed' {
         $sourceUrl = 'https://bitbucket.org/test-workspace/test-source.git'
-        $destinationUrl = 'https://github.com/bcgov-c/test-destination.git'
+        $destinationUrl = 'https://github.com/test-org/test-destination.git'
         Write-MigrationState 'VerificationFailed' $sourceUrl $destinationUrl
 
         {

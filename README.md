@@ -1,6 +1,6 @@
 # Bitbucket Cloud to GitHub migration
 
-`Invoke-RepoMigration.ps1` migrates one approved private Bitbucket Cloud repository to an empty private repository in the `bcgov-c` GitHub organization.
+`Invoke-RepoMigration.ps1` migrates one approved private Bitbucket Cloud repository to an empty private repository in a specified GitHub organization.
 
 Detailed project documentation:
 
@@ -25,6 +25,7 @@ Authenticate using Git Credential Manager or GitHub CLI. Do not put credentials 
 .\Invoke-RepoMigration.ps1 `
   -BitbucketWorkspace "workspace" `
   -BitbucketRepo "source-repo" `
+  -GitHubOrganization "organization" `
   -GitHubRepo "destination-repo" `
   -Owner "responsible-owner" `
   -UsesLfs `
@@ -55,6 +56,7 @@ After a push starts, normal migration runs are blocked. Compare the current sour
 .\Invoke-RepoMigration.ps1 `
   -BitbucketWorkspace "workspace" `
   -BitbucketRepo "source-repo" `
+  -GitHubOrganization "organization" `
   -GitHubRepo "destination-repo" `
   -Owner "responsible-owner" `
   -WorkingDirectory "D:\repo-migrations" `
@@ -71,6 +73,7 @@ Retry after push begins only with repository-specific approval:
 .\Invoke-RepoMigration.ps1 `
   -BitbucketWorkspace "workspace" `
   -BitbucketRepo "source-repo" `
+  -GitHubOrganization "organization" `
   -GitHubRepo "destination-repo" `
   -Owner "responsible-owner" `
   -WorkingDirectory "D:\repo-migrations" `
@@ -89,6 +92,7 @@ After technical verification:
 .\Invoke-RepoMigration.ps1 `
   -BitbucketWorkspace "workspace" `
   -BitbucketRepo "source-repo" `
+  -GitHubOrganization "organization" `
   -GitHubRepo "destination-repo" `
   -Owner "responsible-owner" `
   -WorkingDirectory "D:\repo-migrations" `

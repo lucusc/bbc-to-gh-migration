@@ -12,6 +12,11 @@ param(
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$')]
+    [string]$GitHubOrganization,
+
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
     [string]$GitHubRepo,
 
@@ -40,7 +45,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:GitHubOrganization = 'bcgov-c'
 $script:RunId = Get-Date -Format 'yyyyMMdd-HHmmssfff'
 $script:RepositoryDirectory = Join-Path $WorkingDirectory "$BitbucketWorkspace--$BitbucketRepo"
 $script:RunDirectory = Join-Path $script:RepositoryDirectory $script:RunId
@@ -941,6 +945,7 @@ function Invoke-Main {
     try {
         Assert-SafeRepositoryName $BitbucketWorkspace 'BitbucketWorkspace'
         Assert-SafeRepositoryName $BitbucketRepo 'BitbucketRepo'
+        Assert-SafeRepositoryName $GitHubOrganization 'GitHubOrganization'
         Assert-SafeRepositoryName $GitHubRepo 'GitHubRepo'
 
         $sourceUrl = "https://bitbucket.org/$BitbucketWorkspace/$BitbucketRepo.git"

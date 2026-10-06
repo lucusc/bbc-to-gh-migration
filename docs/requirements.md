@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide a PowerShell-based, auditable process for migrating approved private repositories from Bitbucket Cloud to private repositories in the `bcgov-c` GitHub organization while preserving Git history, branches, tags, and Git LFS objects.
+Provide a PowerShell-based, auditable process for migrating approved private repositories from Bitbucket Cloud to private repositories in an explicitly specified GitHub organization while preserving Git history, branches, tags, and Git LFS objects.
 
 The process must prioritize data integrity and deliberate operator control over unattended throughput. A mirror push can delete destination refs that do not exist at the source, so the script must not blindly repeat a push.
 
@@ -25,7 +25,7 @@ TLS certificate verification must remain enabled. The process must fail if Git c
 The operator must authenticate to:
 
 - Bitbucket Cloud with permission to read each private source repository.
-- GitHub with permission to create or write private repositories in `bcgov-c`.
+- GitHub with permission to create or write private repositories in the specified organization.
 
 Credentials must be supplied through Git Credential Manager, GitHub CLI, SSH credential management, or environment-based authentication. Tokens and passwords must not appear in repository URLs, command arguments, logs, result files, or committed configuration.
 
@@ -37,13 +37,14 @@ The first delivery slice accepts:
 
 - Bitbucket workspace.
 - Bitbucket repository name.
+- Approved GitHub organization.
 - Approved GitHub repository name.
 - Responsible owner.
 - Whether the repository uses Git LFS.
 - Local working directory.
 - Minimum required free disk space.
 
-The GitHub organization is fixed to `bcgov-c`.
+The GitHub organization is a required, explicitly approved input.
 
 ### Reviewed batch operation
 
@@ -51,6 +52,7 @@ The later batch workflow must read a reviewed mapping containing:
 
 - Bitbucket workspace.
 - Bitbucket repository.
+- Approved GitHub organization.
 - Approved GitHub repository name.
 - Responsible owner.
 - Whether Git LFS is used.
@@ -58,13 +60,13 @@ The later batch workflow must read a reviewed mapping containing:
 - Reviewer identity.
 - Review timestamp.
 
-The batch workflow must reject missing approvals, malformed values, duplicate sources, duplicate destinations, and destinations outside `bcgov-c`.
+The batch workflow must reject missing approvals, malformed values, duplicate sources, duplicate destinations, and destinations outside the explicitly approved GitHub organization.
 
 ## Destination requirements
 
 Before migration, every destination repository must:
 
-- Exist in `bcgov-c`, unless explicitly created by a later repository-creation mode.
+- Exist in the specified GitHub organization, unless explicitly created by a later repository-creation mode.
 - Be private.
 - Be writable by the authenticated identity.
 - Be empty, with no branches, tags, or other Git refs.
@@ -183,7 +185,7 @@ A technically verified repository remains pending until owner sign-off is explic
 - Never use `Invoke-Expression` for command construction.
 - Pass native command arguments as discrete values.
 - Reject unsafe repository names and path traversal.
-- Keep destination organization selection fixed or explicitly allow-listed.
+- Require an explicitly approved destination organization and reject unsafe organization names.
 - Fail closed when access, metadata, or verification cannot be determined.
 
 ## Phase 1 acceptance criteria
@@ -197,4 +199,3 @@ The single-repository slice is complete when:
 - A durable guard prevents an automatic repeat after mirror push begins.
 - Logs and JSON results contain no credentials.
 - Owner sign-off remains an explicit post-verification action.
-
