@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .migration_batch import BatchEntry, load_batch
+from .migration_dashboard import generate_dashboard
 from .migration_execution import ExecutionMixin
 from .migration_git import GitMixin
 from .migration_preflight import PreflightMixin
@@ -96,6 +97,7 @@ def run_batch(args: argparse.Namespace, entries: list[BatchEntry]) -> int:
         "status": "Running",
         "succeeded": 0,
         "failed": 0,
+        "skipped": 0,
         "repositories": [],
     }
     write_json(summary_path, summary)
@@ -126,19 +128,51 @@ def run_batch(args: argparse.Namespace, entries: list[BatchEntry]) -> int:
             "logPath": str(migration.log_path),
         }
         try:
-            migration.execute(entry.operation, entry.approver, entry.approval_reference, entry.comments)
+            state = migration.get_state() if entry.operation == "reconcile" else None
+            if entry.operation == "reconcile" and state is None:
+                reason = "Repository has no migration state; reconciliation was not run."
+                migration.log("WARN", reason)
+                write_json(
+                    migration.result_path,
+                    {
+                        "runId": migration.run_id,
+                        "status": "NotApplicable",
+                        "owner": entry.owner,
+                        "source": migration.source_url,
+                        "destination": migration.destination_url,
+                        "usesLfs": entry.uses_lfs,
+                        "operation": entry.operation,
+                        "reason": reason,
+                        "completedAt": now(),
+                    },
+                )
+                generate_dashboard(migration.working_directory)
+                result.update(status="Skipped", outcome="NotApplicable", reason=reason)
+                summary["skipped"] += 1
+                print(f"SKIPPED: {migration.workspace}/{migration.repo}: {reason}")
+            else:
+                migration.execute(
+                    entry.operation,
+                    entry.approver,
+                    entry.approval_reference,
+                    entry.comments,
+                )
         except Exception as exc:
             result.update(status="Failed", error=to_safe_text(str(exc)))
             summary["failed"] += 1
             print(f"ERROR: {migration.workspace}/{migration.repo}: {to_safe_text(str(exc))}", file=sys.stderr)
         else:
-            result["status"] = "Succeeded"
-            summary["succeeded"] += 1
+            if result.get("status") != "Skipped":
+                result["status"] = "Succeeded"
+                summary["succeeded"] += 1
         summary["repositories"].append(result)
         write_json(summary_path, summary)
     summary.update(status="Failed" if summary["failed"] else "Succeeded", completedAt=now())
     write_json(summary_path, summary)
-    print(f"Batch complete: {summary['succeeded']} succeeded, {summary['failed']} failed. Summary: {summary_path}")
+    print(
+        f"Batch complete: {summary['succeeded']} succeeded, "
+        f"{summary['skipped']} skipped, {summary['failed']} failed. Summary: {summary_path}"
+    )
     return 1 if summary["failed"] else 0
 
 
