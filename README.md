@@ -1,6 +1,6 @@
 # Bitbucket Cloud to GitHub migration
 
-`bbc_to_gh_migration` migrates one approved private Bitbucket Cloud repository to an empty repository in a specified GitHub organization. The destination may be public or private. It runs on Windows (Windows Terminal, cmd) and Linux (bash) and needs no PowerShell.
+`bbc_to_gh_migration` migrates one approved private Bitbucket Cloud repository, or a reviewed batch of repositories, to empty repositories in a specified GitHub organization. The destinations may be public or private. It runs on Windows (Windows Terminal, cmd) and Linux (bash) and needs no PowerShell.
 
 Detailed project documentation:
 
@@ -14,6 +14,7 @@ The project uses the standard Python `src` layout. The installable
 implementation split by responsibility:
 
 - `cli.py` provides the command-line entry point and the public `Migration` API.
+- `migration_batch.py` validates reviewed per-repository JSON parameter sets.
 - `migration_utils.py` contains shared constants, validation, comparison, and JSON helpers.
 - `migration_execution.py` contains sanitized logging and native command execution.
 - `migration_state.py` contains durable state transitions and recovery identity checks.
@@ -78,14 +79,94 @@ and status filters, verified branch, tag, other-ref and LFS details with hashes,
 run and approval metadata, and relative links to each run's `result.json` and
 `migration.log`. Sign-off entries retain the details from their technical verification.
 The dashboard is refreshed after successful and failed migrate,
-reconcile, retry, and sign-off operations, so it is ready for future multi-repository
-runs that share the same working directory.
+reconcile, retry, and sign-off operations, including multi-repository runs that
+share the same working directory.
 
 The tool writes `migration-state.json` immediately before the mirror push. Any later migrate run for the same source repository is blocked, including after a successful migration. Reconcile the source and destination before removing or changing this guard; a repeated mirror push can delete destination-only refs.
 
 The confirmation is an interactive `yes` prompt. When stdin is not a terminal the run is refused unless `--yes` is given. Use `--yes` only when the complete source and destination mapping has already received explicit approval.
 
 The exit code is 0 on success and 1 on failure.
+
+## Multiple repositories
+
+Supply a JSON file containing a non-empty array of per-repository parameter sets.
+For example, save this as `repositories.json`:
+
+```json
+[
+  {
+    "bitbucket_repo": "source-one",
+    "github_repo": "destination-one",
+    "owner": "owner-one",
+    "uses_lfs": false,
+    "approval_status": "approved",
+    "reviewer": "reviewer-name",
+    "reviewed_at": "2026-10-08T12:00:00Z"
+  },
+  {
+    "bitbucket_repo": "source-two",
+    "github_repo": "destination-two",
+    "owner": "owner-two",
+    "uses_lfs": true,
+    "minimum_free_space_gb": 20,
+    "approval_status": "approved",
+    "reviewer": "reviewer-name",
+    "reviewed_at": "2026-10-08T12:00:00Z"
+  }
+]
+```
+
+Run the reviewed mappings:
+
+```bash
+repo-migration --batch-file repositories.json --bitbucket-workspace workspace --github-org organization --operation migrate --working-directory migration-work --yes
+```
+
+Each entry must include all mapping and review fields shown above, including an
+explicit JSON boolean for `uses_lfs`. `reviewed_at` must be an ISO 8601 timestamp
+with a timezone. Review metadata records operator-supplied approval; the tool
+does not authenticate the reviewer.
+
+Optional per-repository parameters are `minimum_free_space_gb`, `approver`,
+`approval_reference`, and `comments`. Both `retry` and `signoff`
+require their own per-repository `approver` and `approval_reference`; manifest
+review does not replace recovery or owner approval.
+
+`--bitbucket-workspace` and `--github-org` are required global settings for the
+batch. Every entry uses that source workspace and destination organization.
+`--operation` selects `migrate` (the default), `reconcile`, `retry`, or `signoff`
+for every repository. To reconcile the same batch, reuse the manifest:
+
+```bash
+repo-migration --batch-file repositories.json --bitbucket-workspace workspace --github-org organization --operation reconcile --working-directory migration-work
+```
+
+The working directory, `--yes`, and default disk threshold are also shared command
+options; the disk threshold can be overridden per entry. Existing manifests may
+still include `bitbucket_workspace`, `github_org`, and `operation`, but those
+values must match the global settings (workspace and organization comparisons
+are case-insensitive). Conflicting values are rejected, not overridden.
+Do not combine `--batch-file` with single-repository names, owner, LFS, or approval
+flags; put those parameters in the manifest.
+
+The complete manifest is validated before any migration starts. Invalid values,
+unknown fields, missing approvals, duplicate sources or destinations, and
+conflicting state directories reject the entire batch. Valid entries run
+sequentially in file order, with each repository's existing preflight,
+confirmation, verification, and recovery guards. Network preflight is performed
+per repository, not batch-wide. Without `--yes`, each migrate or retry operation
+still requires interactive confirmation.
+
+An individual failure is logged and does not prevent later entries from running.
+The command returns 1 if any entry fails, otherwise 0 (usage errors return 2).
+Each repository keeps independent logs, results, and state. An aggregate
+`batch-runs/<batch-id>/summary.json` records the global workspace, organization,
+and operation along with mappings, review metadata, run IDs,
+result/log paths, sanitized errors, and success/failure counts; it is updated
+after each entry and its location is printed at completion. A successful migrate
+or retry still requires owner sign-off, as recorded in its repository result.
+The shared HTML dashboard is refreshed by each operation.
 
 ## Reconciliation
 
