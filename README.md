@@ -150,6 +150,12 @@ are case-insensitive). Conflicting values are rejected, not overridden.
 Do not combine `--batch-file` with single-repository names, owner, LFS, or approval
 flags; put those parameters in the manifest.
 
+During batch reconciliation, a repository with no `migration-state.json` is skipped
+as `NotApplicable` because no migration attempt exists to reconcile. It is counted
+separately from successes and failures and appears as "Not applicable" in the
+dashboard. Direct single-repository reconciliation remains an error when state is
+missing.
+
 The complete manifest is validated before any migration starts. Invalid values,
 unknown fields, missing approvals, duplicate sources or destinations, and
 conflicting state directories reject the entire batch. Valid entries run
@@ -163,7 +169,7 @@ The command returns 1 if any entry fails, otherwise 0 (usage errors return 2).
 Each repository keeps independent logs, results, and state. An aggregate
 `batch-runs/<batch-id>/summary.json` records the global workspace, organization,
 and operation along with mappings, review metadata, run IDs,
-result/log paths, sanitized errors, and success/failure counts; it is updated
+result/log paths, sanitized errors, and success/skip/failure counts; it is updated
 after each entry and its location is printed at completion. A successful migrate
 or retry still requires owner sign-off, as recorded in its repository result.
 The shared HTML dashboard is refreshed by each operation.

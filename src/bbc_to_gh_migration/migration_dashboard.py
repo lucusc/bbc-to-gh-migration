@@ -274,6 +274,10 @@ def _dashboard_html(payload: str) -> str:
       return "warning";
     }}
 
+    function statusLabel(status) {{
+      return status === "NotApplicable" ? "Not applicable" : text(status);
+    }}
+
     function timeFor(run) {{
       const value = run.completedAt || run.failedAt;
       if (!value) return "\u2014";
@@ -332,7 +336,7 @@ def _dashboard_html(payload: str) -> str:
 
       const outcome = add(main, "div");
       add(outcome, "span", "label", "Outcome");
-      add(outcome, "div", `status ${{statusClass(run)}}`, text(run.status));
+      add(outcome, "div", `status ${{statusClass(run)}}`, statusLabel(run.status));
       field(main, "Last run", `${{timeFor(run)}} \u00b7 ${{text(run.operation, "operation not recorded")}}`);
 
       const button = add(main, "button", "details-button", "Details");
@@ -353,6 +357,7 @@ def _dashboard_html(payload: str) -> str:
 
       const messages = [];
       if (run.error) messages.push(run.error);
+      if (run.reason) messages.push(run.reason);
       if (Array.isArray(run.differences) && run.differences.length) messages.push(run.differences.join("\\n"));
       if (messages.length) add(details, "p", "message", messages.join("\\n\\n"));
       renderRefs(details, run);
@@ -403,6 +408,7 @@ def _dashboard_html(payload: str) -> str:
     document.getElementById("signed-count").textContent = RUNS.filter((run) => run.status === "SignedOff").length;
     document.getElementById("attention-count").textContent = RUNS.filter((run) =>
       run.status === "Failed" || run.status === "Unreadable" || (run.status === "Reconciled" && !run.exactMatch)
+      || run.status === "NotApplicable"
     ).length;
     search.addEventListener("input", render);
     statusFilter.addEventListener("change", render);
