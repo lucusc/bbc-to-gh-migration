@@ -43,6 +43,26 @@ def collect_latest_results(working_directory: Path) -> list[dict]:
                 "error": f"Could not read result.json: {exc}",
             }
 
+        if result.get("status") == "SignedOff" and not result.get("verifiedRefs"):
+            for prior_path in result_paths[1:]:
+                try:
+                    prior = json.loads(prior_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError, json.JSONDecodeError):
+                    continue
+                if prior.get("verifiedRefs"):
+                    for key in (
+                        "verifiedRefs",
+                        "sourceRefCount",
+                        "destinationRefCount",
+                        "sourceLfsObjectCount",
+                        "destinationLfsObjectCount",
+                        "usesLfs",
+                    ):
+                        if key in prior:
+                            result[key] = prior[key]
+                    result["verificationRunId"] = prior.get("runId")
+                    break
+
         result["repository"] = _display_name(result, repository_directory.name)
         result["repositoryDirectory"] = repository_directory.name
         relative_run = f"{quote(repository_directory.name)}/{quote(run_directory.name)}"
@@ -191,6 +211,12 @@ def _dashboard_html(payload: str) -> str:
     .repo-details {{ border-top: 1px solid var(--cp-border); padding: 20px; background: var(--cp-bg-elevated); }}
     .detail-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px; }}
     .message {{ margin: 0 0 16px; padding: 12px; border-left: 3px solid var(--cp-accent); background: var(--cp-accent-soft); white-space: pre-wrap; overflow-wrap: anywhere; }}
+    .ref-sections {{ display: grid; gap: 16px; margin: 20px 0; }}
+    .ref-section {{ border: 1px solid var(--cp-border); border-radius: 0.625rem; overflow: hidden; }}
+    .ref-heading {{ display: flex; justify-content: space-between; gap: 16px; margin: 0; padding: 10px 12px; background: var(--cp-surface-soft); font-size: 0.875rem; }}
+    .ref-list {{ margin: 0; padding: 0; list-style: none; }}
+    .ref-row {{ display: grid; grid-template-columns: minmax(140px, 1fr) minmax(220px, 1.5fr); gap: 16px; padding: 9px 12px; border-top: 1px solid var(--cp-border); }}
+    .ref-hash {{ color: var(--cp-text-muted); overflow-wrap: anywhere; }}
     .links {{ display: flex; flex-wrap: wrap; gap: 16px; }}
     .empty {{ padding: 48px 24px; text-align: center; background: var(--cp-surface); border: 1px dashed var(--cp-border-strong); border-radius: 16px; }}
     code {{ font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.875em; }}
@@ -270,6 +296,33 @@ def _dashboard_html(payload: str) -> str:
       return wrapper;
     }}
 
+    function renderRefs(parent, run) {{
+      const inventory = run.verifiedRefs;
+      if (!inventory) return;
+      const sections = add(parent, "div", "ref-sections");
+      const groups = [
+        ["Verified branches", inventory.branches],
+        ["Verified tags", inventory.tags],
+        ["Verified other refs", inventory.other]
+      ];
+      groups.forEach(([title, refs]) => {{
+        if (!Array.isArray(refs) || !refs.length) return;
+        const section = add(sections, "section", "ref-section");
+        const heading = add(section, "h3", "ref-heading");
+        add(heading, "span", "", title);
+        add(heading, "span", "muted", String(refs.length));
+        const rows = add(section, "ul", "ref-list");
+        refs.forEach((ref) => {{
+          const row = add(rows, "li", "ref-row");
+          add(row, "code", "", text(ref.name));
+          const hashes = ref.peeledHash
+            ? `${{text(ref.hash, "tag object unavailable")}} \u2192 ${{ref.peeledHash}}`
+            : text(ref.hash);
+          add(row, "code", "ref-hash", hashes);
+        }});
+      }});
+    }}
+
     function renderCard(run) {{
       const card = add(list, "article", "repo-card");
       const main = add(card, "div", "repo-main");
@@ -293,11 +346,16 @@ def _dashboard_html(payload: str) -> str:
       field(grid, "Destination", run.destination);
       field(grid, "Source refs", run.sourceRefCount);
       field(grid, "Destination refs", run.destinationRefCount);
+      field(grid, "LFS", run.usesLfs ? "Enabled" : "Not enabled");
+      field(grid, "Verified LFS objects", run.destinationLfsObjectCount);
+      field(grid, "Run ID", run.runId);
+      field(grid, "Approval reference", run.approvalReference);
 
       const messages = [];
       if (run.error) messages.push(run.error);
       if (Array.isArray(run.differences) && run.differences.length) messages.push(run.differences.join("\\n"));
       if (messages.length) add(details, "p", "message", messages.join("\\n\\n"));
+      renderRefs(details, run);
 
       const links = add(details, "div", "links");
       const resultLink = add(links, "a", "", "View result JSON");
@@ -318,7 +376,9 @@ def _dashboard_html(payload: str) -> str:
       const query = search.value.trim().toLowerCase();
       const status = statusFilter.value;
       const visible = RUNS.filter((run) => {{
-        const searchable = [run.repository, run.owner, run.source, run.destination, run.status]
+        const refNames = Object.values(run.verifiedRefs || {{}})
+          .flat().map((ref) => ref.name);
+        const searchable = [run.repository, run.owner, run.source, run.destination, run.status, ...refNames]
           .filter(Boolean).join(" ").toLowerCase();
         return (!query || searchable.includes(query)) && (!status || run.status === status);
       }});

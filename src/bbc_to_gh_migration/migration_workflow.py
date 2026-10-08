@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 
 from .migration_dashboard import generate_dashboard
+from .migration_git import verified_ref_inventory
 from .migration_utils import (
     MigrationError,
     POST_PUSH_STATES,
@@ -142,6 +143,7 @@ class WorkflowMixin:
             "destinationRefCount": len(destination_refs),
             "sourceLfsObjectCount": len(source_lfs),
             "destinationLfsObjectCount": len(destination_lfs),
+            "verifiedRefs": verified_ref_inventory(destination_refs),
         }
 
     def reconcile(self) -> dict:
@@ -276,8 +278,11 @@ class WorkflowMixin:
                     {
                         "runId": self.run_id,
                         "status": "Reconciled",
+                        "owner": self.owner,
                         "source": self.source_url,
                         "destination": self.destination_url,
+                        "usesLfs": bool(self.uses_lfs),
+                        "operation": operation,
                         "priorMigrationStatus": self.get_state()["status"],
                         **{
                             k: result[k]
@@ -291,6 +296,11 @@ class WorkflowMixin:
                                 "differences",
                             )
                         },
+                        "verifiedRefs": (
+                            verified_ref_inventory(result["destinationRefs"])
+                            if result["exactMatch"]
+                            else None
+                        ),
                         "completedAt": now(),
                     },
                 )
@@ -303,6 +313,7 @@ class WorkflowMixin:
                     {
                         "runId": self.run_id,
                         "status": "SignedOff",
+                        "operation": operation,
                         "source": self.source_url,
                         "destination": self.destination_url,
                         "owner": self.owner,

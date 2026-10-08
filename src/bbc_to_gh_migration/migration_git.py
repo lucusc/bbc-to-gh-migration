@@ -7,6 +7,31 @@ from pathlib import Path
 from .migration_utils import MigrationError, compare_refs, parse_ref_lines
 
 
+def verified_ref_inventory(refs: dict[str, str]) -> dict[str, list[dict[str, str]]]:
+    """Group verified refs into readable branch, tag, and other inventories."""
+    branches: list[dict[str, str]] = []
+    tags: dict[str, dict[str, str]] = {}
+    other: list[dict[str, str]] = []
+
+    for ref, commit_hash in sorted(refs.items()):
+        if ref.startswith("refs/heads/"):
+            branches.append({"name": ref.removeprefix("refs/heads/"), "hash": commit_hash})
+        elif ref.startswith("refs/tags/"):
+            name = ref.removeprefix("refs/tags/")
+            if name.endswith("^{}"):
+                tags.setdefault(name[:-3], {"name": name[:-3]})["peeledHash"] = commit_hash
+            else:
+                tags.setdefault(name, {"name": name})["hash"] = commit_hash
+        else:
+            other.append({"name": ref, "hash": commit_hash})
+
+    return {
+        "branches": branches,
+        "tags": sorted(tags.values(), key=lambda tag: tag["name"]),
+        "other": other,
+    }
+
+
 class GitMixin:
     def remote_ref_lines(self, url: str, branches_and_tags_only: bool = False) -> list[str]:
         args = ["git", "ls-remote"]

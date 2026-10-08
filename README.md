@@ -74,8 +74,10 @@ The tool:
 Open `migration-dashboard.html` directly in a browser to see the latest recorded
 outcome for every repository in that working directory. The page is self-contained
 and needs no web server or network access. It includes summary counts, repository
-and status filters, run details, and relative links to each run's `result.json` and
-`migration.log`. The dashboard is refreshed after successful and failed migrate,
+and status filters, verified branch, tag, other-ref and LFS details with hashes,
+run and approval metadata, and relative links to each run's `result.json` and
+`migration.log`. Sign-off entries retain the details from their technical verification.
+The dashboard is refreshed after successful and failed migrate,
 reconcile, retry, and sign-off operations, so it is ready for future multi-repository
 runs that share the same working directory.
 
