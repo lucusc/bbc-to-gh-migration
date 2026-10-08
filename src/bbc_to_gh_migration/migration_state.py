@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 
-from migration_utils import MigrationError, POST_PUSH_STATES, PRE_PUSH_STATES, now, write_json
+from .migration_utils import MigrationError, POST_PUSH_STATES, PRE_PUSH_STATES, now, write_json
 
 
 class StateMixin:

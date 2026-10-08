@@ -8,7 +8,7 @@ Deliver complete, usable vertical slices. The first slice migrates one repositor
 
 **Status:** Implemented.
 
-**Outcome:** An operator can migrate one approved private Bitbucket Cloud repository to a pre-created, empty private repository in an explicitly specified GitHub organization.
+**Outcome:** An operator can migrate one approved private Bitbucket Cloud repository to a pre-created, empty public or private repository in an explicitly specified GitHub organization.
 
 **Delivered capabilities:**
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Migrate a private Bitbucket Cloud repository to a private GitHub repository."""
+"""Migrate a private Bitbucket Cloud repository to a GitHub repository."""
 from __future__ import annotations
 
 import argparse
@@ -8,15 +8,15 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from migration_execution import ExecutionMixin
-from migration_git import GitMixin
-from migration_preflight import PreflightMixin
-from migration_state import StateMixin
-from migration_utils import (
+from .migration_execution import ExecutionMixin
+from .migration_git import GitMixin
+from .migration_preflight import PreflightMixin
+from .migration_state import StateMixin
+from .migration_utils import (
     MigrationError, assert_safe_name, compare_refs, compare_sets, parse_ref_lines,
     to_safe_text, write_json, now, NAME_PATTERN, ORG_PATTERN, PRE_PUSH_STATES, POST_PUSH_STATES,
 )
-from migration_workflow import WorkflowMixin
+from .migration_workflow import WorkflowMixin
 
 
 class Migration(ExecutionMixin, StateMixin, PreflightMixin, GitMixin, WorkflowMixin):
@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--github-repo", required=True, type=name_arg(NAME_PATTERN))
     p.add_argument("--owner", required=True)
     p.add_argument("--uses-lfs", action="store_true")
-    p.add_argument("--working-directory", default=str(Path(__file__).resolve().parent / "migration-work"))
+    p.add_argument("--working-directory", default=str(Path.cwd() / "migration-work"))
     p.add_argument("--minimum-free-space-gb", type=int, default=5, choices=range(1, 10241), metavar="1-10240")
     p.add_argument("--operation", choices=["migrate", "reconcile", "retry", "signoff"], default="migrate")
     p.add_argument("--approver")

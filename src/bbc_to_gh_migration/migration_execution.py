@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 
-from migration_utils import MigrationError, now, to_safe_text
+from .migration_utils import MigrationError, now, to_safe_text
 
 
 class ExecutionMixin:
@@ -42,4 +42,3 @@ class ExecutionMixin:
                 + " ".join(to_safe_text(a) for a in args)
             )
         return lines
-

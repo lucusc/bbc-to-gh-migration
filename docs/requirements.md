@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide a cross-platform (Windows and Linux), Python-based, auditable process that runs from Windows Terminal or a bash shell without PowerShell for migrating approved private repositories from Bitbucket Cloud to private repositories in an explicitly specified GitHub organization while preserving Git history, branches, tags, and Git LFS objects.
+Provide a cross-platform (Windows and Linux), Python-based, auditable process that runs from Windows Terminal or a bash shell without PowerShell for migrating approved private repositories from Bitbucket Cloud to public or private repositories in an explicitly specified GitHub organization while preserving Git history, branches, tags, and Git LFS objects.
 
 The process must prioritize data integrity and deliberate operator control over unattended throughput. A mirror push can delete destination refs that do not exist at the source, so the script must not blindly repeat a push.
 
@@ -26,7 +26,7 @@ TLS certificate verification must remain enabled. The process must fail if Git c
 The operator must authenticate to:
 
 - Bitbucket Cloud with permission to read each private source repository.
-- GitHub with permission to create or write private repositories in the specified organization.
+- GitHub with permission to write the destination repositories in the specified organization.
 
 Credentials must be supplied through Git Credential Manager, GitHub CLI, SSH credential management, or environment-based authentication. Tokens and passwords must not appear in repository URLs, command arguments, logs, result files, or committed configuration.
 
@@ -68,7 +68,6 @@ The batch workflow must reject missing approvals, malformed values, duplicate so
 Before migration, every destination repository must:
 
 - Exist in the specified GitHub organization, unless explicitly created by a later repository-creation mode.
-- Be private.
 - Be writable by the authenticated identity.
 - Be empty, with no branches, tags, or other Git refs.
 
@@ -84,7 +83,7 @@ Before modifying a destination, the script must:
 2. Validate TLS certificate verification.
 3. Validate free disk space.
 4. Confirm access to the private Bitbucket source.
-5. Confirm GitHub destination existence, privacy, and push permission.
+5. Confirm GitHub destination existence, organization ownership, and push permission.
 6. Confirm the destination has no refs.
 7. Display the credential-free source-to-destination mapping.
 8. Require confirmation unless the exact migration has already received explicit approval.
@@ -193,7 +192,7 @@ A technically verified repository remains pending until owner sign-off is explic
 
 The single-repository slice is complete when:
 
-- One approved private repository can be migrated to a pre-created empty private GitHub repository.
+- One approved private repository can be migrated to a pre-created empty public or private GitHub repository.
 - Multiple branches and tags retain identical names and hashes.
 - LFS repositories fetch, push, download, and verify their expected objects.
 - Missing authentication, insufficient disk, disabled TLS verification, non-empty destinations, failed commands, and verification mismatches cause failure.

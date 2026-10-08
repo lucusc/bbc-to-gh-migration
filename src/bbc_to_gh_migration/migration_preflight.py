@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import urllib.request
 
-from migration_utils import GB, MigrationError
+from .migration_utils import GB, MigrationError
 
 
 class PreflightMixin:
@@ -107,8 +107,6 @@ class PreflightMixin:
         metadata = self.github_metadata(self.gh_repo)
         if str(metadata.get("owner", {}).get("login", "")).lower() != self.org.lower():
             raise MigrationError(f"Destination repository is not owned by {self.org}.")
-        if not metadata.get("private"):
-            raise MigrationError("Destination GitHub repository must be private.")
         if not metadata.get("permissions", {}).get("push"):
             raise MigrationError(
                 "Authenticated GitHub identity does not have push permission on the destination."

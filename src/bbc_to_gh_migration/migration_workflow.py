@@ -3,7 +3,18 @@ from __future__ import annotations
 
 import sys
 
-from migration_utils import MigrationError, POST_PUSH_STATES, compare_refs, compare_sets, now, parse_ref_lines, to_safe_text, write_json
+from .migration_dashboard import generate_dashboard
+from .migration_utils import (
+    MigrationError,
+    POST_PUSH_STATES,
+    assert_safe_name,
+    compare_refs,
+    compare_sets,
+    now,
+    parse_ref_lines,
+    to_safe_text,
+    write_json,
+)
 
 
 class WorkflowMixin:
@@ -23,7 +34,7 @@ class WorkflowMixin:
             raise MigrationError(
                 f"Destination repository is not empty; found {len(destination_lines)} ref entries."
             )
-        self.log("INFO", "Destination is private, writable, and empty.")
+        self.log("INFO", "Destination is writable and empty.")
         return source_lines
 
     def reconciliation_preflight(self) -> None:
@@ -351,9 +362,21 @@ class WorkflowMixin:
                     "runId": self.run_id,
                     "status": "Failed",
                     "owner": self.owner,
+                    "source": self.source_url,
+                    "destination": self.destination_url,
+                    "usesLfs": bool(self.uses_lfs),
+                    "operation": operation,
                     "error": to_safe_text(str(exc)),
                     "failedAt": now(),
                 },
             )
             raise
-
+        finally:
+            operation_failed = sys.exc_info()[0] is not None
+            try:
+                dashboard_path = generate_dashboard(self.working_directory)
+                self.log("INFO", f"Migration dashboard updated: {dashboard_path}")
+            except Exception as exc:
+                self.log("ERROR", f"Could not update migration dashboard: {exc}")
+                if not operation_failed:
+                    raise

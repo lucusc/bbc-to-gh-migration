@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from migration_utils import MigrationError, compare_refs, parse_ref_lines
+from .migration_utils import MigrationError, compare_refs, parse_ref_lines
 
 
 class GitMixin:
